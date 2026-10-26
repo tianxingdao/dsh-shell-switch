@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Shell 选择器",
+    "description": "选择 bash 工具实际调用的本机 shell（Niubash、Git Bash、MSYS2 等），并在设置中提供选择器页面。"
+  }
+}

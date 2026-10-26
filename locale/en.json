@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Shell Selector",
+    "description": "Choose which local shell the bash tool runs in (Niubash, Git Bash, MSYS2, …) and add a Shell selector page to Settings."
+  }
+}

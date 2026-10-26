@@ -1,0 +1,8 @@
+# dsh-shell-switch: one host row. It mounts a configurable bash executor in a
+# private `shell` scope and pairs it with the shipped `bash` tool, so the
+# preset's PowerShell tool and the host's own executor stay untouched.
+- insert:
+    - id: shell-switch
+      name: dsh-shell-switch
+      config:
+        shell: auto
