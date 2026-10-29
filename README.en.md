@@ -196,7 +196,7 @@ Resolution order: the Settings choice → `shellPath` → `shell` → auto-detec
 
 ## HTTP API
 
-Host-internal endpoints, reachable only from loopback and the same origin (used by the Settings page):
+Host-internal endpoints, reachable only from the same origin (used by the Settings page; opening the GUI through a LAN address or a reverse proxy works too):
 
 | Method | Path | Meaning |
 |---|---|---|

@@ -1,6 +1,6 @@
 {
   "name": "dsh-shell-switch",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Choose which local shell runs DSH bash commands (e.g. Niubash, Git Bash, MSYS2) and add a Shell selector page to Settings.",
   "license": "MIT",

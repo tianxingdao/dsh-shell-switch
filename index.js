@@ -533,17 +533,28 @@ function json(res, status, value) {
   res.end(body);
 }
 
-/** Only the local page may read or change the shell choice. */
+/**
+ * Only the page served by this harness may read or change the shell choice.
+ *
+ * A remote-address check is wrong here: the GUI is reachable over a LAN or a
+ * reverse proxy, so legitimate calls arrive from a non-loopback address. The
+ * boundary that matters is same-origin — a cross-site page must not be able to
+ * drive this API — plus the browser's `Sec-Fetch-Site` hint when present.
+ * Mutating requests additionally require a JSON content type, which forces a
+ * CORS preflight that this route never answers.
+ */
 function trusted(req) {
-  const address = req.socket?.remoteAddress ?? '';
-  if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(address)) return false;
   const origin = req.headers.origin;
-  if (origin === undefined) return true;
-  try {
-    return new URL(origin).host === req.headers.host;
-  } catch {
-    return false;
+  if (origin !== undefined) {
+    try {
+      if (new URL(origin).host !== req.headers.host) return false;
+    } catch {
+      return false;
+    }
   }
+  const site = req.headers['sec-fetch-site'];
+  if (site !== undefined && !['same-origin', 'none'].includes(site)) return false;
+  return true;
 }
 
 /** Read a small JSON request body. */
@@ -618,7 +629,15 @@ function registerRoutes(ctx, config) {
           return json(res, 200, statePayload(ctx, config, url.searchParams.get('refresh') === '1'));
         }
         if (req.method === 'POST' && tail === '/select') {
-          const body = await readJson(req);
+          if (!String(req.headers['content-type'] ?? '').toLowerCase().includes('application/json')) {
+            return json(res, 415, { ok: false, error: 'content-type must be application/json' });
+          }
+          let body;
+          try {
+            body = await readJson(req);
+          } catch {
+            return json(res, 400, { ok: false, error: 'invalid JSON body' });
+          }
           if (body?.action === 'reset') {
             clearSelection();
             return json(res, 200, statePayload(ctx, config, false));
