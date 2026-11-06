@@ -330,6 +330,11 @@ npm publish                # prepublishOnly runs the syntax check first
 
 `publishConfig.registry` pins npmjs, so the package publishes there even when the user's npmrc points at a mirror. No list resubmission is needed afterwards: the market matches by package name, and the prebuilt install replaces the from-source command.
 
+Two current npm behaviours worth knowing:
+
+- with 2FA set to "Authorization only" an OTP cannot authorise a publish; a granular access token with **Bypass 2FA** is required;
+- npm stages brand-new packages: the first publish creates a public `0.0.0-stage` placeholder and the real version follows, so `npm view` may briefly show `0.0.0-stage`. That is expected.
+
 ## License
 
 MIT

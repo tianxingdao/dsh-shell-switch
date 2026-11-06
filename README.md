@@ -328,6 +328,11 @@ npm publish                # prepublishOnly 会先跑语法检查
 
 包已声明 `publishConfig.registry`，因此即使用户 npmrc 指向镜像也会发布到 npmjs。发布后无需重新提交列表：市场按包名匹配，预构建安装会自动取代源码安装。
 
+两点与新版 npm 相关：
+
+- 账号开了 2FA 且为「仅登录（Authorization only）」时，OTP 不能用于发布，需要带 **Bypass 2FA** 的 granular access token；
+- npm 对**新包**启用了分阶段发布（staged publishing），首次发布会自动生成一个公开的 `0.0.0-stage` 占位版本，真正版本随后写入；`npm view` 可能短暂显示 `0.0.0-stage`，属正常现象。
+
 ## License
 
 MIT
