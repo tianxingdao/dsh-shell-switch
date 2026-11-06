@@ -1,8 +1,7 @@
 {
   "name": "dsh-shell-switch",
-  "version": "0.1.1",
-  "private": true,
-  "description": "Choose which local shell runs DSH bash commands (e.g. Niubash, Git Bash, MSYS2) and add a Shell selector page to Settings.",
+  "version": "0.1.2",
+  "description": "Choose which local shell runs DSH bash commands (Niubash, Git Bash, MSYS2) and add a Shell selector page to Settings.",
   "license": "MIT",
   "author": "tianxingdao",
   "repository": {
@@ -13,6 +12,10 @@
   "bugs": {
     "url": "https://github.com/tianxingdao/dsh-shell-switch/issues"
   },
+  "engines": {
+    "node": ">=20",
+    "dsh": ">=0.2.1-rc.2 <0.3.0"
+  },
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -22,7 +25,8 @@
     "bash",
     "niubash",
     "git-bash",
-    "msys2"
+    "msys2",
+    "windows"
   ],
   "type": "module",
   "main": "index.js",
@@ -50,5 +54,36 @@
         "@deepseek-ai/dsh-client-ui-settings"
       ]
     }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-bash-sandbox": "^0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-locale": "^0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-settings": "^0.2.1-rc.2",
+    "@deepseek-ai/dsh-tool-bash": "^0.2.1-rc.2",
+    "@deepseek-ai/schemastery": "^3.18.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-bash-sandbox": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-locale": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-settings": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tool-bash": {
+      "optional": true
+    },
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    }
+  },
+  "scripts": {
+    "check": "node --check index.js && node --check client.js",
+    "prepublishOnly": "npm run check"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/"
   }
 }

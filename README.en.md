@@ -59,13 +59,49 @@ This plugin fills that gap: **detect every local shell → choose one in Setting
 | Item | Requirement |
 |---|---|
 | OS | Windows 10/11 (primary target; other platforms simply skip the `pwsh` filter, and shell detection targets Windows) |
-| DSH | `0.2.1-rc.2` or newer (developed against `0.2.1-rc.2`) |
+| DSH | `>=0.2.1-rc.2 <0.3.0` (see `engines.dsh`; developed and verified against `0.2.1-rc.5`) |
+| Node | `>=20` (provided by DSH; no separate install) |
 | Local shell | At least one bash-compatible shell: Niubash, Git Bash, MSYS2, Cygwin, or a `bash.exe` on `PATH` |
-| Node | Provided by DSH; no separate install |
+
+### Compatibility declaration
+
+The manifest states the host requirement in both places the market and the pre-install check read:
+
+```jsonc
+{
+  "engines": { "node": ">=20", "dsh": ">=0.2.1-rc.2 <0.3.0" },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-bash-sandbox": "^0.2.1-rc.2",
+    "@deepseek-ai/dsh-tool-bash": "^0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-locale": "^0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-settings": "^0.2.1-rc.2",
+    "@deepseek-ai/schemastery": "^3.18.0"
+  },
+  "peerDependenciesMeta": { "…": { "optional": true } }
+}
+```
+
+- `engines.dsh` names the supported DSH release line (the `0.2.1` series); outside it the market marks the plugin incompatible;
+- the peers are declarative only: those packages come from the host DSH and are resolved at runtime from the host installation (see [How it works](#how-it-works)), so all of them are marked `optional` to keep npm/pnpm from copying them into the profile and creating a second instance;
+- moving to DSH `0.3.x` means widening both ranges and publishing a new version.
 
 ## Installation
 
-### Option 1: install from a local directory (development / personal use)
+### Option 1: install from npm (recommended)
+
+```bash
+dsh plugin add dsh-shell-switch
+```
+
+Or from a DSH Agent session:
+
+```text
+plugin_manager install_bundle  target = dsh-shell-switch
+```
+
+A prebuilt package needs no build approval; it lands in `node_modules/dsh-shell-switch`.
+
+### Option 2: install from a local directory (development / personal use)
 
 ```text
 plugin_manager install_bundle  target = <absolute path to this repository>
@@ -79,13 +115,13 @@ install_bundle: /path/to/dsh-shell-switch
 
 After installation the profile's `dsh.profile.bundles` gains `dsh-shell-switch`, `node_modules/dsh-shell-switch` links to that directory, and the row id is `shell-switch`.
 
-### Option 2: clone from GitHub, then install
+### Option 3: clone from GitHub, then install
 
 ```bash
 git clone https://github.com/tianxingdao/dsh-shell-switch.git
 ```
 
-Then install the cloned directory as the `target`, as in Option 1.
+Then install the cloned directory as the `target`, as in Option 2.
 
 ### After installing
 
@@ -281,8 +317,18 @@ Logs: `%TEMP%\dsh-shell-switch-debug.log` (written only on mount, tool activatio
 ## Development
 
 - After an edit: `plugin_manager set_plugin` with `false` then `true` triggers a hot reload (the client half needs a page refresh);
-- Syntax check: `node --check index.js && node --check client.js`;
+- Syntax check: `npm run check` (equivalent to `node --check index.js && node --check client.js`);
 - Debug endpoint: `GET /api/dsh-shell-switch/state` (on the machine running DSH).
+
+### Publishing to npm
+
+```bash
+npm login --registry https://registry.npmjs.org/
+npm version patch          # or minor / major
+npm publish                # prepublishOnly runs the syntax check first
+```
+
+`publishConfig.registry` pins npmjs, so the package publishes there even when the user's npmrc points at a mirror. No list resubmission is needed afterwards: the market matches by package name, and the prebuilt install replaces the from-source command.
 
 ## License
 

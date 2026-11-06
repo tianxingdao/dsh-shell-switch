@@ -57,13 +57,49 @@ Windows 上的 DSH 默认有两条 shell 路径：
 | 项目 | 要求 |
 |---|---|
 | 操作系统 | Windows 10/11（主要目标；非 Windows 会退化为不过滤 `pwsh`，检测逻辑也面向 Windows） |
-| DSH | `0.2.1-rc.2` 及以上（开发验证于 `0.2.1-rc.2`） |
+| DSH | `>=0.2.1-rc.2 <0.3.0`（见 `package.json` 的 `engines.dsh`；开发与验证于 `0.2.1-rc.5`） |
+| Node | `>=20`（DSH 自带，无需单独安装） |
 | 本机 shell | 至少一个 bash 兼容 shell：Niubash、Git Bash、MSYS2、Cygwin，或 PATH 上的 `bash.exe` |
-| Node | 由 DSH 自带，无需单独安装 |
+
+### 兼容性声明
+
+manifest 同时写入两处声明，市场与安装前检查都会读取：
+
+```jsonc
+{
+  "engines": { "node": ">=20", "dsh": ">=0.2.1-rc.2 <0.3.0" },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-bash-sandbox": "^0.2.1-rc.2",
+    "@deepseek-ai/dsh-tool-bash": "^0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-locale": "^0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-settings": "^0.2.1-rc.2",
+    "@deepseek-ai/schemastery": "^3.18.0"
+  },
+  "peerDependenciesMeta": { "…": { "optional": true } }
+}
+```
+
+- `engines.dsh` 说明支持的 DSH 版本线（`0.2.1` 系列），超出范围时市场会直接标记为不兼容；
+- peer 只声明、不安装：这些包由宿主 DSH 提供，插件运行时通过宿主安装目录解析（见[工作原理](#工作原理)），所以全部标为 `optional`，避免被复制进 profile 造成两份实例；
+- 升级到 DSH `0.3.x` 时需要同步放宽这两个范围后再发布新版本。
 
 ## 安装
 
-### 方式一：从本地目录安装（开发 / 自用）
+### 方式一：从 npm 安装（推荐）
+
+```bash
+dsh plugin add dsh-shell-switch
+```
+
+或在 DSH 的 Agent 会话里：
+
+```text
+plugin_manager install_bundle  target = dsh-shell-switch
+```
+
+预构建包不需要构建授权，安装后为 `node_modules/dsh-shell-switch`。
+
+### 方式二：从本地目录安装（开发 / 自用）
 
 ```text
 plugin_manager install_bundle  target = <本仓库的绝对路径>
@@ -77,13 +113,13 @@ install_bundle: /path/to/dsh-shell-switch
 
 安装后 profile 的 `dsh.profile.bundles` 会增加 `dsh-shell-switch`，`node_modules/dsh-shell-switch` 指向该目录（link），行 id 为 `shell-switch`。
 
-### 方式二：从 GitHub 克隆后安装
+### 方式三：从 GitHub 克隆后安装
 
 ```bash
 git clone https://github.com/tianxingdao/dsh-shell-switch.git
 ```
 
-然后把克隆出来的目录作为 `target`，按方式一安装。
+然后把克隆出来的目录作为 `target`，按方式二安装。
 
 ### 安装后确认
 
@@ -279,8 +315,18 @@ plugin_manager remove_bundle  target = dsh-shell-switch
 ## 开发
 
 - 修改后：`plugin_manager set_plugin` 先 `false` 再 `true` 触发热重载（客户端需刷新页面）；
-- 语法检查：`node --check index.js && node --check client.js`；
+- 语法检查：`npm run check`（等价于 `node --check index.js && node --check client.js`）；
 - 调试端点：`GET /api/dsh-shell-switch/state`（在 DSH 进程所在机器上）。
+
+### 发布到 npm
+
+```bash
+npm login --registry https://registry.npmjs.org/
+npm version patch          # 或 minor / major
+npm publish                # prepublishOnly 会先跑语法检查
+```
+
+包已声明 `publishConfig.registry`，因此即使用户 npmrc 指向镜像也会发布到 npmjs。发布后无需重新提交列表：市场按包名匹配，预构建安装会自动取代源码安装。
 
 ## License
 
