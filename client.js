@@ -157,11 +157,12 @@ window.__ModuleLoader__.load({
       const [message, setMessage] = React.useState(null);
       const [error, setError] = React.useState(null);
 
-      const load = React.useCallback(async (force) => {
+      const load = React.useCallback(async (force, settle) => {
         setBusy(true);
         setError(null);
         try {
-          const next = await request(force === true ? '/state?refresh=1' : '/state');
+          const tail = settle === true ? '/state?refresh=1&settle=1' : force === true ? '/state?refresh=1' : '/state';
+          const next = await request(tail);
           setState(next);
           setDraft(next.selected?.path ?? next.effective?.path ?? '');
         } catch (failure) {
@@ -172,6 +173,14 @@ window.__ModuleLoader__.load({
       }, [t]);
 
       React.useEffect(() => { load(false); }, [load]);
+
+      // Versions are probed in the background by the host, so the first response
+      // carries none. Re-read once shortly after the list appears instead of
+      // making the user hit "Rescan" for them.
+      React.useEffect(() => {
+        const timer = setTimeout(() => { load(false); }, 1200);
+        return () => clearTimeout(timer);
+      }, [load]);
 
       const save = async () => {
         if (draft === '') return;
@@ -247,7 +256,7 @@ window.__ModuleLoader__.load({
         h('div', { style: styles.row },
           h('button', { type: 'button', style: styles.primary, disabled: busy || !dirty, onClick: save }, busy ? t('saving') : t('save')),
           h('button', { type: 'button', style: styles.button, disabled: busy, onClick: reset }, t('reset')),
-          h('button', { type: 'button', style: styles.button, disabled: busy, onClick: () => load(true) }, t('refresh'))),
+          h('button', { type: 'button', style: styles.button, disabled: busy, onClick: () => load(false, true) }, t('refresh'))),
         message !== null ? h('p', { style: styles.message }, message) : null,
         error !== null ? h('p', { style: styles.error }, error) : null,
         state.effective !== null

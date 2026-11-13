@@ -66,12 +66,32 @@ function dshRequire() {
 
 const dsh = dshRequire();
 const loadShipped = (id) => import(pathToFileURL(dsh.resolve(id)).href);
-const [{ SandboxBashExecutor }, schemastery, toolBash] = await Promise.all([
-  loadShipped('@deepseek-ai/dsh-bash-sandbox'),
-  loadShipped('@deepseek-ai/schemastery'),
-  loadShipped('@deepseek-ai/dsh-tool-bash'),
-]);
-const z = schemastery.default ?? schemastery;
+
+/**
+ * The shipped packages, loaded once and reused.
+ *
+ * Loading is deferred until {@link shipped} is first awaited: creating an
+ * Agent must not pay for three dynamic imports, and only attaching an Agent
+ * actually needs these modules. A second Agent reuses the same promise.
+ * @returns {Promise<{ SandboxBashExecutor: Function, toolBash: object }>} the loaded modules.
+ */
+let shippedPromise;
+function shipped() {
+  shippedPromise ??= Promise.all([
+    loadShipped('@deepseek-ai/dsh-bash-sandbox'),
+    loadShipped('@deepseek-ai/dsh-tool-bash'),
+  ]).then(([sandbox, tool]) => ({ SandboxBashExecutor: sandbox.SandboxBashExecutor, toolBash: tool }));
+  return shippedPromise;
+}
+
+/** The schemastery instance, loaded in parallel with the first Agent attach. */
+let schemasteryPromise;
+function schemastery() {
+  schemasteryPromise ??= loadShipped('@deepseek-ai/schemastery').then((module) => module.default ?? module);
+  return schemasteryPromise;
+}
+
+const z = await schemastery();
 
 /** Plugin config: the bash executor's budgets plus the shell choice. */
 export const Config = z.object({
@@ -193,8 +213,20 @@ const writeSelection = (shellPath) => writeStore({ shell: { path: shellPath, at:
 const clearSelection = () => writeStore({ shell: null });
 
 /** Installed programs whose `InstallLocation` names a shell family. */
-function uninstallLocations() {
-  if (!isWin) return [];
+/**
+ * Installed programs whose `InstallLocation` names a shell family.
+ *
+ * Querying each hive recursively costs seconds on a real machine (HKLM alone
+ * measured ~5 s), so it is warmed once in the background and cached for ten
+ * minutes. The first page load may therefore show only the well-known and PATH
+ * shells; the next refresh adds registered installs.
+ * @param {boolean} [wait] - block until the scan finishes (only for explicit rescans).
+ * @returns {string[]} install locations of shell-family programs.
+ */
+let registryCache = { at: 0, locations: [], promise: null };
+
+function registryScan() {
+  if (!isWin) return { at: Date.now(), locations: [] };
   const keys = [
     'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
     'HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
@@ -219,11 +251,43 @@ function uninstallLocations() {
       if (match !== null && match[1].trim().length > 0) locations.push(match[1].trim());
     }
   }
-  return locations;
+  return { at: Date.now(), locations };
+}
+
+/**
+ * Non-blocking view of the registry scan: start one pass if the cache is cold,
+ * return whatever is known right now.
+ * @returns {string[]} cached install locations (empty while the first scan runs).
+ */
+function uninstallLocations() {
+  if (!isWin) return [];
+  const fresh = Date.now() - registryCache.at < 600000;
+  if (fresh || registryCache.promise !== null) return registryCache.locations;
+  registryCache.promise = new Promise((resolve) => {
+    setImmediate(() => {
+      try {
+        registryCache = registryScan();
+      } catch {
+        registryCache = { at: Date.now(), locations: [] };
+      } finally {
+        if (registryCache.promise !== null) registryCache.promise = null;
+        resolve(undefined);
+      }
+    });
+  });
+  return registryCache.locations;
+}
+
+/** Wait for the registry scan (explicit rescan only). */
+async function uninstallLocationsSettled() {
+  uninstallLocations();
+  if (registryCache.promise !== null) await registryCache.promise;
+  return registryCache.locations;
 }
 
 /** Well-known shell executables on Windows. */
 function knownShells() {
+  const t0 = Date.now();
   const env = process.env;
   const winRoot = env.SystemRoot ?? 'C:\\Windows';
   const programFiles = env.ProgramFiles ?? 'C:\\Program Files';
@@ -233,7 +297,10 @@ function knownShells() {
   const entries = [];
   const add = (candidate, meta) => entries.push({ path: candidate, ...meta });
 
-  for (const location of uninstallLocations()) {
+  const tReg = Date.now();
+  const locations = uninstallLocations();
+  debug('known-shells', 'registry=' + (Date.now() - tReg) + 'ms', 'locations=' + locations.length);
+  for (const location of locations) {
     for (const relative of [
       'winuxcmd\\usr\\bin\\bash.exe',
       'winuxcmd\\bin\\bash.exe',
@@ -349,11 +416,21 @@ let discovery = { at: 0, shells: [] };
  * @param {boolean} refresh - ignore the short-lived cache.
  * @returns {Array<Record<string, unknown>>} the detected shells.
  */
-function discoverShells(refresh = false) {
+async function discoverShells(refresh = false) {
   if (!refresh && Date.now() - discovery.at < 15000) return discovery.shells;
+  // Wait for the registry scan only while it is on its very first pass: the
+  // result is what lets a Niubash install be discovered at all, and waiting
+  // once (a few seconds) is better than a list that silently misses it.
+  if (registryCache.at === 0) await uninstallLocationsSettled();
+  const t0 = Date.now();
+  const tKnown = Date.now();
+  const known = knownShells();
+  const tPath = Date.now();
+  const onPath = pathShells();
+  debug('discover', 'known=' + (tPath - tKnown) + 'ms', 'path=' + (Date.now() - tPath) + 'ms', 'total=' + (Date.now() - t0) + 'ms');
   const shells = [];
   const seen = new Set();
-  for (const entry of [...knownShells(), ...pathShells()]) {
+  for (const entry of [...known, ...onPath]) {
     let real;
     try {
       real = fs.realpathSync.native(entry.path);
@@ -380,8 +457,13 @@ function discoverShells(refresh = false) {
 }
 
 const versions = new Map();
+let versionsWarming = false;
 
-/** Best-effort version probe for one shell; cached for ten minutes. */
+/**
+ * Best-effort version probe for one shell; cached for ten minutes.
+ * @param {Record<string, unknown>} shell - a detected shell.
+ * @returns {string} the version, or an empty string when it cannot be read.
+ */
 function probeVersion(shell) {
   const cached = versions.get(shell.path);
   if (cached !== undefined && Date.now() - cached.at < 600000) return cached.version;
@@ -403,13 +485,33 @@ function probeVersion(shell) {
   return version;
 }
 
-/** Fill versions for compatible shells, bounded so the page stays responsive. */
+/**
+ * Fill in versions for compatible shells without blocking the request.
+ *
+ * Running `bash --version` costs tens of milliseconds per shell and the probe
+ * is synchronous, so probing inside the request makes the page wait every time
+ * it opens. Instead the response carries whatever is cached (empty on the first
+ * call) and one background pass fills the cache; the page's next refresh shows
+ * the versions.
+ * @param {Array<Record<string, unknown>>} shells - detected shells.
+ * @returns {Array<Record<string, unknown>>} shells annotated with cached versions.
+ */
 function withVersions(shells) {
-  const deadline = Date.now() + 3000;
-  return shells.map((shell) => ({
-    ...shell,
-    version: shell.compatible && Date.now() < deadline ? probeVersion(shell) : '',
-  }));
+  const pending = shells.filter((shell) => shell.compatible && !versions.has(shell.path));
+  if (pending.length > 0 && !versionsWarming) {
+    versionsWarming = true;
+    setImmediate(() => {
+      try {
+        for (const shell of pending) probeVersion(shell);
+      } finally {
+        versionsWarming = false;
+      }
+    });
+  }
+  return shells.map((shell) => {
+    const cached = versions.get(shell.path);
+    return { ...shell, version: cached?.version ?? '' };
+  });
 }
 
 /** Does this path name one of the detected shells? */
@@ -473,53 +575,64 @@ function resolveShell(config, shells) {
 /**
  * The bash executor: the shipped sandbox-aware executor with one change — every
  * invocation names the resolved shell explicitly instead of `bash` on PATH.
+ *
+ * The base class comes from the shipped package, which is loaded lazily, so
+ * this class is built on first use rather than declared with `extends`.
  */
-class ShellSwitchExecutor extends SandboxBashExecutor {
-  static Config = Config;
-  static inject = ['subprocess', 'sandbox', 'sandboxPolicy'];
+let ShellSwitchExecutor = null;
 
-  /** The shell every command runs through, resolved per call. */
-  current() {
-    const decision = resolveShell(this.config, discoverShells());
-    if (decision.shell === undefined) {
-      throw new Error('dsh-shell-switch: 没有可用的 bash shell；请在 设置 → Shell 选择器 中选择，或安装 Niubash / Git Bash / MSYS2');
-    }
-    if (decision.shell.compatible === false) {
-      throw new Error(`dsh-shell-switch: ${decision.shell.label} 不是 bash 方言，无法执行 bash 命令`);
-    }
-    return decision;
-  }
+/** Build the executor class once the shipped package is available. */
+async function shellSwitchExecutor() {
+  if (ShellSwitchExecutor !== null) return ShellSwitchExecutor;
+  const { SandboxBashExecutor } = await shipped();
+  ShellSwitchExecutor = class extends SandboxBashExecutor {
+    static Config = Config;
+    static inject = ['subprocess', 'sandbox', 'sandboxPolicy'];
 
-  /**
-   * Wrap the chosen shell's argv through the sandbox provider.
-   * @param {string} command - the bash command source.
-   * @param {object} policy - resolved confined execution policy.
-   * @param {AbortSignal} [signal] - cancellation of confinement preparation.
-   * @returns {Promise<object>} the confined argv and classification facts.
-   */
-  confine(command, policy, signal) {
-    const { shell } = this.current();
-    return this.ctx.sandbox.confine([shell.path, '-c', command], policy, signal);
-  }
-
-  /**
-   * Run one resolved spec. Full-access runs bypass confinement and therefore
-   * need their own argv; confined runs go through `confine` above.
-   * @param {object} spec - the resolved execution spec.
-   * @returns {Promise<object>} the execution handle.
-   */
-  async execute(spec) {
-    const policy = spec.sandboxPolicy;
-    if (policy?.mode === 'danger-full-access') {
-      const { shell } = this.current();
-      const execution = await this.executeArgv(spec, [shell.path, '-c', spec.command]);
-      return SandboxBashExecutor.decorateResult(execution, (result) => ({
-        ...result,
-        sandbox: { mode: 'danger-full-access', denied: false },
-      }));
+    /** The shell every command runs through, resolved per call. */
+    async current() {
+      const decision = resolveShell(this.config, await discoverShells());
+      if (decision.shell === undefined) {
+        throw new Error('dsh-shell-switch: 没有可用的 bash shell；请在 设置 → Shell 选择器 中选择，或安装 Niubash / Git Bash / MSYS2');
+      }
+      if (decision.shell.compatible === false) {
+        throw new Error(`dsh-shell-switch: ${decision.shell.label} 不是 bash 方言，无法执行 bash 命令`);
+      }
+      return decision;
     }
-    return super.execute(spec);
-  }
+
+    /**
+     * Wrap the chosen shell's argv through the sandbox provider.
+     * @param {string} command - the bash command source.
+     * @param {object} policy - resolved confined execution policy.
+     * @param {AbortSignal} [signal] - cancellation of confinement preparation.
+     * @returns {Promise<object>} the confined argv and classification facts.
+     */
+    async confine(command, policy, signal) {
+      const { shell } = await this.current();
+      return this.ctx.sandbox.confine([shell.path, '-c', command], policy, signal);
+    }
+
+    /**
+     * Run one resolved spec. Full-access runs bypass confinement and therefore
+     * need their own argv; confined runs go through `confine` above.
+     * @param {object} spec - the resolved execution spec.
+     * @returns {Promise<object>} the execution handle.
+     */
+    async execute(spec) {
+      const policy = spec.sandboxPolicy;
+      if (policy?.mode === 'danger-full-access') {
+        const { shell } = await this.current();
+        const execution = await this.executeArgv(spec, [shell.path, '-c', spec.command]);
+        return SandboxBashExecutor.decorateResult(execution, (result) => ({
+          ...result,
+          sandbox: { mode: 'danger-full-access', denied: false },
+        }));
+      }
+      return super.execute(spec);
+    }
+  };
+  return ShellSwitchExecutor;
 }
 
 /** JSON response helper. */
@@ -570,9 +683,20 @@ async function readJson(req, limit = 16 * 1024) {
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 
-/** The state the Settings page renders. */
-function statePayload(ctx, config, refresh) {
-  const shells = withVersions(discoverShells(refresh));
+/**
+ * The state the Settings page renders.
+ * @param {import('@deepseek-ai/cordis').Context} ctx - the plugin context.
+ * @param {Record<string, unknown>} config - the row config.
+ * @param {boolean} refresh - bypass the discovery cache.
+ * @param {boolean} settle - wait for the registry scan (explicit rescan only).
+ * @returns {Promise<object>} the payload.
+ */
+async function statePayload(ctx, config, refresh, settle = false) {
+  if (settle) {
+    await uninstallLocationsSettled();
+    refresh = true;
+  }
+  const shells = withVersions(await discoverShells(refresh));
   const selected = readSelection();
   const decision = resolveShell(config, shells);
   let policy;
@@ -626,7 +750,7 @@ function registerRoutes(ctx, config) {
         const url = new URL(req.url ?? '/', 'http://localhost');
         const tail = url.pathname.slice(API.length) || '/';
         if (req.method === 'GET' && (tail === '/' || tail === '/state')) {
-          return json(res, 200, statePayload(ctx, config, url.searchParams.get('refresh') === '1'));
+          return json(res, 200, await statePayload(ctx, config, url.searchParams.get('refresh') === '1', url.searchParams.get('settle') === '1'));
         }
         if (req.method === 'POST' && tail === '/select') {
           if (!String(req.headers['content-type'] ?? '').toLowerCase().includes('application/json')) {
@@ -640,16 +764,16 @@ function registerRoutes(ctx, config) {
           }
           if (body?.action === 'reset') {
             clearSelection();
-            return json(res, 200, statePayload(ctx, config, false));
+            return json(res, 200, await statePayload(ctx, config, false));
           }
-          const shells = discoverShells(true);
+          const shells = await discoverShells(true);
           const hit = findByPath(shells, body?.path);
           if (hit === undefined) return json(res, 400, { ok: false, error: `未找到该 shell：${String(body?.path ?? '')}` });
           if (hit.compatible !== true) {
             return json(res, 400, { ok: false, error: `${hit.label} 不是 bash 方言，无法执行 bash 命令` });
           }
           writeSelection(hit.path);
-          return json(res, 200, statePayload(ctx, config, false));
+          return json(res, 200, await statePayload(ctx, config, false));
         }
         return json(res, 404, { ok: false, error: 'not found' });
       } catch (error) {
@@ -727,9 +851,12 @@ function attachAgent(ctx, config, agent) {
     const fiber = branch.plugin({
       name: 'shell-switch-agent',
       inject: ['subprocess', 'sandbox', 'sandboxPolicy'],
-      apply(inner) {
-        new ShellSwitchExecutor(inner, executorConfig(config));
-        const toolFiber = inner.plugin(toolBash, { enableRunInBackground: true });
+      async apply(inner) {
+        // Deferred here so creating an Agent costs nothing until it really needs
+        // the bash tool; both calls are memoized after the first Agent.
+        const [Executor, tool] = await Promise.all([shellSwitchExecutor(), shipped().then((m) => m.toolBash)]);
+        new Executor(inner, executorConfig(config));
+        const toolFiber = inner.plugin(tool, { enableRunInBackground: true });
         Promise.resolve(toolFiber).then(
           () => {
             diagnostics.tool = 'active';
@@ -798,5 +925,21 @@ export function apply(ctx, config) {
     };
   }, 'dsh-shell-switch: per-agent bash tool');
   ctx.effect(() => registerRoutes(ctx, config), 'dsh-shell-switch: settings API');
+  // Warm the registry scan and the version cache at mount so the first visit to
+  // the Settings page is answered from cache instead of waiting for them.
+  ctx.effect(() => {
+    uninstallLocations();
+    const timer = setTimeout(() => {
+      try {
+        for (const shell of discovery.shells) {
+          if (shell.compatible) probeVersion(shell);
+        }
+      } catch {
+        // best effort
+      }
+    }, 1500);
+    timer.unref?.();
+    return () => clearTimeout(timer);
+  }, 'dsh-shell-switch: shell cache warm-up');
   debug('row-apply');
 }

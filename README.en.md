@@ -155,7 +155,7 @@ bash: {
 - The card shows the effective shell, the saved choice, the fallback config, and the sandbox mode;
 - **Save** writes `%DSH_HOME%\shell-switch.json`; the next command uses it;
 - **Reset** clears the choice and falls back to the plugin's `shell` / `shellPath` / auto-detection;
-- **Rescan** bypasses the 15-second cache (useful after installing a new shell).
+- **Rescan** re-reads the registry and refreshes versions (useful after installing a new shell; this one waits for the scan, every other call is served from cache).
 
 ### Hiding `pwsh` (Windows)
 
@@ -287,6 +287,8 @@ Compatibility notes:
   - disabling or removing the plugin restores `pwsh`.
 - The client Settings page is registered at DSH startup; after a hot install, refresh the page (restart DSH if needed).
 - Non-Windows platforms skip the `pwsh` filter (they never compose `pwsh` anyway).
+- Versions can be briefly empty on the first visit to the Settings page: version probing and the registry scan warm up in the background and the page re-reads itself about a second later; an explicit **Rescan** waits for the scan synchronously.
+- The registry scan (`reg query /s` over three hives) takes seconds on a real machine, so its result is cached for ten minutes and only the first use waits.
 
 ## Uninstalling and restoring pwsh
 
