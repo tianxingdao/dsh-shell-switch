@@ -148,7 +148,7 @@ bash: {
 
 ### 设置 → Shell 选择器
 
-- 下拉框分两组：**可用于 bash**（可选择）与 **已检测到，但不是 bash 方言**（WSL bash、PowerShell、cmd、Niubash 的 `winuxsh.exe`，禁用并标注原因）；
+- 下拉框分两组：**可用于 bash**（可选择，含 WSL bash）与 **已检测到，但不是 bash 方言**（PowerShell、cmd、Niubash 的 `winuxsh.exe`，禁用并标注原因）；
 - 每个 bash 显示版本（如 `5.3.0`）与完整路径；
 - 卡片显示当前生效 shell、已保存选择、回退配置、沙箱模式；
 - **保存**：写入 `%DSH_HOME%\shell-switch.json`，下一条命令生效；
@@ -168,8 +168,10 @@ bash: {
 Agent 创建
   └─ agent.ctx.isolate('shell')                 每个 Agent 一个独立 shell 作用域
        ├─ ShellSwitchExecutor                   继承官方 SandboxBashExecutor
-       │    ├─ confine(cmd) → ctx.sandbox.confine([<选中 shell>, '-c', cmd], policy)
-       │    └─ execute()   → danger-full-access 时走 executeArgv
+       │    ├─ confine(cmd) → ctx.sandbox.confine(argvFor(...), policy)
+       │    ├─ argvFor()    → 普通 bash: [shell, '-c', cmd]
+       │    │                  WSL 启动器: [shell, '-l', '-c', 'cd /mnt/c/... && <已翻译 cmd>']
+       │    └─ execute()   → 自带受限/全权限两条路径（与官方执行器同构）
        └─ @deepseek-ai/dsh-tool-bash            官方工具，注册进该 Agent 的 tools 层
 ```
 
@@ -266,7 +268,10 @@ Host 内部接口，仅同源页面可访问（供设置页使用；通过局域
 兼容性说明：
 
 - **Niubash** 的 `bash.exe` 在 DSH 受限令牌沙箱内实测可用（bash 5.3.0）；
-- **WSL bash** 虽然也是 bash，但 Windows 路径在 WSL 内不存在，默认标记为不兼容；
+- **WSL bash**（`%SystemRoot%\System32\bash.exe`）是 bash 方言，但它是 WSL 启动器：bash 跑在发行版里，`C:\` 在那里不存在。选中它时插件会做两件事——把工作目录和命令中出现的绝对 Windows 路径翻译成 `/mnt/<盘符>/...`，并用 `-l` 登录 shell 启动。因此命令能正常执行，但：
+  - 只能用命令行里写死的路径，插件不翻译 `workdir` 之外的运行时值（如环境变量里的路径）；
+  - 文件权限、行尾、路径大小写遵循 Linux 语义；
+  - 需要确实装有一个带 bash 的发行版（`wsl -l -v` 查看）；只有 `docker-desktop` 这类没有 bash 的发行版时，选中它会在命令阶段报 `execvpe(/bin/bash) ... No such file or directory`。
 - 选中非 bash 方言会被接口拒绝（该工具只接受 bash 语法）。
 
 ## 沙箱与权限
@@ -309,6 +314,7 @@ plugin_manager remove_bundle  target = dsh-shell-switch
 | 报错找不到 DSH 安装 | 设置环境变量 `DSH_INSTALL` 指向 DSH 安装根目录后重启 |
 | 报错「没有可用的 bash shell」 | 在设置页选择，或安装 Niubash/Git Bash/MSYS2 后点「重新扫描」 |
 | 选中项显示「不是 bash 方言」 | 换一个「可用于 bash」分组里的 shell |
+| 选了 WSL bash 后报 `execvpe(/bin/bash)` | 当前默认发行版里没有 bash（例如只装了 docker-desktop）；装一个带 bash 的发行版并设为默认，或改用 Niubash/Git Bash |
 | 命令报文件拒绝 | 属于会话沙箱策略，不是插件；按 DSH 的权限提示处理 |
 | pwsh 还在 | 该会话是在屏蔽前创建的：新开一个会话，或等下一次模型请求重算工具目录 |
 

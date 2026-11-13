@@ -150,7 +150,7 @@ bash: {
 
 ### Settings → Shell selector
 
-- The dropdown has two groups: **Bash-compatible** (selectable) and **Detected, not bash-compatible** (WSL bash, PowerShell, cmd, Niubash's `winuxsh.exe`; disabled with a reason);
+- The dropdown has two groups: **Bash-compatible** (selectable, including WSL bash) and **Detected, not bash-compatible** (PowerShell, cmd, Niubash's `winuxsh.exe`; disabled with a reason);
 - Each bash shows its version (e.g. `5.3.0`) and full path;
 - The card shows the effective shell, the saved choice, the fallback config, and the sandbox mode;
 - **Save** writes `%DSH_HOME%\shell-switch.json`; the next command uses it;
@@ -170,8 +170,10 @@ While this plugin is active, every Agent's tool list omits `pwsh` on Windows. Th
 Agent created
   └─ agent.ctx.isolate('shell')                 one private shell scope per Agent
        ├─ ShellSwitchExecutor                   extends the shipped SandboxBashExecutor
-       │    ├─ confine(cmd) → ctx.sandbox.confine([<selected shell>, '-c', cmd], policy)
-       │    └─ execute()   → executeArgv for danger-full-access
+       │    ├─ confine(cmd) → ctx.sandbox.confine(argvFor(...), policy)
+       │    ├─ argvFor()    → bash: [shell, '-c', cmd]
+       │    │                  WSL launcher: [shell, '-l', '-c', 'cd /mnt/c/... && <translated cmd>']
+       │    └─ execute()   → local confined and full-access paths, mirroring the shipped executor
        └─ @deepseek-ai/dsh-tool-bash            official tool, registered in that Agent's tools layer
 ```
 
@@ -268,7 +270,10 @@ Detection order (de-duplicated by real path):
 Compatibility notes:
 
 - **Niubash**'s `bash.exe` was verified inside DSH's restricted-token sandbox (bash 5.3.0);
-- **WSL bash** is still bash, but Windows paths do not exist inside WSL, so it is marked incompatible;
+- **WSL bash** (`%SystemRoot%\System32\bash.exe`) is a bash dialect, but that binary is the WSL launcher: bash runs inside the distro, where `C:\` does not exist. Selecting it makes the plugin translate the working directory and any absolute Windows path written in the command to `/mnt/<drive>/...`, and start with a login shell (`-l`). Commands then work, with caveats:
+  - only literal paths in the command are translated; runtime values (e.g. paths inside environment variables) are not;
+  - file permissions, line endings and path case follow Linux semantics;
+  - a distro that actually ships bash is required (`wsl -l -v`); with only `docker-desktop` installed the command fails with `execvpe(/bin/bash) ... No such file or directory`;
 - Selecting a non-bash shell is rejected by the API (the tool only accepts bash syntax).
 
 ## Sandbox and permissions
@@ -311,6 +316,7 @@ Or disable the `shell-switch` row. After that:
 | "Cannot locate the DeepSeek Harness installation" | Set `DSH_INSTALL` to the DSH installation root and restart |
 | "No usable bash shell" | Pick one in Settings, or install Niubash / Git Bash / MSYS2 and press Rescan |
 | The selected entry is "not bash-compatible" | Choose a shell from the "Bash-compatible" group |
+| WSL bash reports `execvpe(/bin/bash)` | The default distro has no bash (e.g. only `docker-desktop` is installed); install a distro with bash and make it the default, or use Niubash/Git Bash |
 | A command reports a file denial | That is the session sandbox policy, not the plugin; follow DSH's permission guidance |
 | `pwsh` is still there | That session predates the filter: open a new session, or wait for the next model request to rebuild the catalog |
 

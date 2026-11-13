@@ -35,6 +35,7 @@ window.__ModuleLoader__.load({
       loadFailed: 'Could not read the shell list',
       settingsFile: 'Saved in',
       pwshHiddenNote: 'While this plugin is active, on Windows the shipped pwsh tool is hidden from every Agent; disable or remove the plugin to bring it back.',
+      note: 'Note',
     };
 
     /** Simplified Chinese copy for the Shell selector page. */
@@ -67,6 +68,7 @@ window.__ModuleLoader__.load({
       loadFailed: '读取 shell 列表失败',
       settingsFile: '保存位置',
       pwshHiddenNote: '本插件启用期间，如果是 Windows 环境，官方 pwsh 工具对所有 Agent 隐藏；停用或卸载本插件即可恢复。',
+      note: '说明',
     };
 
     /** Resolve the API prefix against the page's base so sub-path deployments work. */
@@ -236,10 +238,12 @@ window.__ModuleLoader__.load({
       const groups = [];
       if (compatible.length > 0) groups.push(h('optgroup', { key: 'compatible', label: t('compatible') },
         compatible.map((shell) => h('option', { key: shell.path, value: shell.path },
-          `${shell.label}${shell.version ? ` · ${shell.version}` : ''}`))));
+          `${shell.label}${shell.version ? ` · ${shell.version}` : ''}${shell.note ? ` — ${shell.note}` : ''}`))));
       if (others.length > 0) groups.push(h('optgroup', { key: 'others', label: t('other') },
         others.map((shell) => h('option', { key: shell.path, value: shell.path, disabled: true },
           `${shell.label}（${t('incompatible')}）`))));
+
+      const selectedShell = shells.find((shell) => shell.path === currentValue) ?? null;
 
       return h('div', { style: styles.page },
         h('h2', { style: styles.title }, t('title')),
@@ -268,6 +272,7 @@ window.__ModuleLoader__.load({
             h(InfoRow, { label: t('selected'), value: state.selected?.path ?? t('none') }),
             h(InfoRow, { label: t('defaults'), value: state.defaults?.shell ?? 'auto' }),
             state.sandbox ? h(InfoRow, { label: t('sandbox'), value: state.sandbox.mode }) : null,
+            selectedShell?.note ? h(InfoRow, { label: t('note'), value: selectedShell.note }) : null,
             h('p', { style: styles.hint }, t('sandboxHint')))
           : h('p', { style: styles.error }, t('empty')),
         state.warning ? h('p', { style: styles.error }, state.warning) : null,

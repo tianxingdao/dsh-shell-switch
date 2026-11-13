@@ -80,7 +80,19 @@ function shipped() {
   shippedPromise ??= Promise.all([
     loadShipped('@deepseek-ai/dsh-bash-sandbox'),
     loadShipped('@deepseek-ai/dsh-tool-bash'),
-  ]).then(([sandbox, tool]) => ({ SandboxBashExecutor: sandbox.SandboxBashExecutor, toolBash: tool }));
+  ]).then(async ([sandbox, tool]) => {
+    // The confined path is driven locally (see the executor below), so it also
+    // needs the diagnostics the shipped executor imports from dsh-sandbox.
+    const diagnostics = await loadShipped('@deepseek-ai/dsh-sandbox');
+    return {
+      SandboxBashExecutor: sandbox.SandboxBashExecutor,
+      SandboxUnavailableError: diagnostics.SandboxUnavailableError,
+      classifyRunnerFailure: diagnostics.classifyRunnerFailure,
+      isRunnerSpawnFailure: diagnostics.isRunnerSpawnFailure,
+      sandboxDenialMarker: diagnostics.sandboxDenialMarker,
+      toolBash: tool,
+    };
+  });
   return shippedPromise;
 }
 
@@ -351,9 +363,13 @@ function knownShells() {
   add(path.join(winRoot, 'System32', 'bash.exe'), {
     id: 'wsl',
     label: 'WSL bash',
-    kind: 'wsl',
-    compatible: false,
+    kind: 'bash',
+    compatible: true,
     source: 'well-known',
+    // `System32\bash.exe` is the WSL launcher: it runs bash inside the distro,
+    // so Windows paths must be translated. The note is shown next to it in the
+    // Settings page; the mapping itself happens in `wslCommand` below.
+    note: 'runs inside WSL: Windows paths are translated to /mnt/<drive>/...',
   });
   add(path.join(programFiles, 'PowerShell', '7', 'pwsh.exe'), {
     id: 'pwsh',
@@ -398,7 +414,15 @@ function pathShells() {
               : /cygwin/i.test(dir)
                 ? 'cygwin'
                 : 'bash';
-        entries.push({ path: candidate, id, label: `bash · ${base}`, kind: 'bash', compatible: true, source: 'path' });
+        entries.push({
+          path: candidate,
+          id,
+          label: `bash · ${base}`,
+          kind: 'bash',
+          compatible: true,
+          source: 'path',
+          note: /\\windows\\system32/i.test(dir) ? 'runs inside WSL: Windows paths are translated to /mnt/<drive>/...' : undefined,
+        });
       } else if (exe === 'nu.exe') {
         entries.push({ path: candidate, id: 'nushell', label: 'Nushell', kind: 'nu', compatible: false, source: 'path' });
       } else {
@@ -448,6 +472,7 @@ async function discoverShells(refresh = false) {
       kind: entry.kind,
       compatible: entry.compatible === true,
       source: entry.source ?? '',
+      ...entry.note === undefined ? {} : { note: entry.note },
       version: '',
     });
   }
@@ -566,10 +591,59 @@ function resolveShell(config, shells) {
     };
   }
   if (configuredId.length > 0 && configuredId !== DEFAULT_SHELL) {
-    const hit = shells.find((shell) => shell.id === configuredId);
+    const hit = shells.find((shell) => shell.id === configuredId && shell.compatible);
     if (hit !== undefined) return { shell: hit, source: 'config' };
   }
   return { shell: shells.find((shell) => shell.compatible), source: 'auto' };
+}
+
+/**
+ * Is this shell the WSL launcher (`%SystemRoot%\\System32\\bash.exe`)?
+ *
+ * That binary does not run bash on Windows: it starts bash inside the default
+ * WSL distro, where `C:\\` does not exist. Everything Windows passes it must be
+ * rewritten first.
+ * @param {Record<string, unknown>} shell - the resolved shell.
+ * @returns {boolean} true when the command has to be translated for WSL.
+ */
+function isWslLauncher(shell) {
+  if (shell?.id === 'wsl') return true;
+  const resolved = String(shell?.path ?? '').replace(/\\/g, '/').toLowerCase();
+  return /\/windows\/system32\/bash\.exe$/.test(resolved);
+}
+
+/**
+ * Translate a Windows path to its WSL form: `C:\\a\\b` becomes `/mnt/c/a/b`.
+ * Already-POSIX paths, UNC paths and anything unparsable pass through unchanged.
+ * @param {string} value - a Windows path.
+ * @returns {string} the path usable inside WSL.
+ */
+function toWslPath(value) {
+  const match = /^([A-Za-z]):[\\/](.*)$/.exec(value);
+  if (match === null) return value;
+  return `/mnt/${match[1].toLowerCase()}/${match[2].replace(/\\/g, '/')}`;
+}
+
+/**
+ * Build the argv that runs one command through WSL.
+ *
+ * Two translations are required, because the child process is inside the
+ * distro: the command itself (absolute Windows paths written in the command
+ * must become `/mnt/<drive>/...`), and the working directory, which Windows
+ * resolves but Linux cannot. `-l` gives a login shell so the distro's PATH and
+ * aliases are present, matching what a terminal in WSL would see.
+ * @param {string} shellPath - the WSL launcher path.
+ * @param {string} command - the bash command source.
+ * @param {string} workdir - the host working directory.
+ * @returns {string[]} argv for the launcher.
+ */
+function wslCommand(shellPath, command, workdir) {
+  const translated = command.replace(
+    /(^|[^\w:])([A-Za-z]):[\\/]([^\s'"`;|&<>()]*)/g,
+    (_match, prefix, drive, rest) => `${prefix}/mnt/${drive.toLowerCase()}/${rest.replace(/\\/g, '/')}`,
+  );
+  const cd = `cd ${JSON.stringify(toWslPath(workdir))} 2>/dev/null || cd ~`;
+  return [shellPath, '-l', '-c', `${cd} && ${translated}`];
 }
 
 /**
@@ -584,10 +658,37 @@ let ShellSwitchExecutor = null;
 /** Build the executor class once the shipped package is available. */
 async function shellSwitchExecutor() {
   if (ShellSwitchExecutor !== null) return ShellSwitchExecutor;
-  const { SandboxBashExecutor } = await shipped();
+  const { SandboxBashExecutor, SandboxUnavailableError, classifyRunnerFailure, isRunnerSpawnFailure, sandboxDenialMarker } =
+    await shipped();
+  /**
+   * Did the sandbox provider reject this run as a policy denial?
+   * @param {{ exitCode?: number|null, stderr: { text: string } }} result - the settled result.
+   * @param {readonly string[]} [signatures] - provider-provided denial markers.
+   * @returns {boolean} whether the run was denied.
+   */
+  const classifyDenial = (result, signatures) => {
+    const text = String(result?.stderr?.text ?? '');
+    if (text.includes(sandboxDenialMarker)) return true;
+    if (Array.isArray(signatures)) {
+      return signatures.some((signature) => signature.length > 0 && text.includes(signature));
+    }
+    return false;
+  };
   ShellSwitchExecutor = class extends SandboxBashExecutor {
     static Config = Config;
     static inject = ['subprocess', 'sandbox', 'sandboxPolicy'];
+
+    /**
+     * @param {import('@deepseek-ai/cordis').Context} ctx - the isolated host context.
+     * @param {object} config - the executor config.
+     */
+    constructor(ctx, config) {
+      super(ctx, config);
+      // The base class keeps this private; the local confined path writes the
+      // same per-process facts, so a name derived from the instance is used and
+      // only touched when the base already created it.
+      this.processFacts ??= new Map();
+    }
 
     /** The shell every command runs through, resolved per call. */
     async current() {
@@ -608,9 +709,26 @@ async function shellSwitchExecutor() {
      * @param {AbortSignal} [signal] - cancellation of confinement preparation.
      * @returns {Promise<object>} the confined argv and classification facts.
      */
-    async confine(command, policy, signal) {
+    async confine(command, policy, signal, workdir) {
       const { shell } = await this.current();
-      return this.ctx.sandbox.confine([shell.path, '-c', command], policy, signal);
+      return this.ctx.sandbox.confine(this.argvFor(shell, command, policy, workdir), policy, signal);
+    }
+
+    /**
+     * The inner argv for one command. Native bash runs `-c` as-is; the WSL
+     * launcher gets the command and the working directory translated, because
+     * the child process lives inside the distro.
+     * @param {Record<string, unknown>} shell - the resolved shell.
+     * @param {string} command - the bash command source.
+     * @param {{ workspaceRoot?: string }} policy - resolved policy, for its root.
+     * @param {string} [workdir] - the resolved command working directory.
+     * @returns {string[]} argv handed to the sandbox provider or the subprocess.
+     */
+    argvFor(shell, command, policy, workdir) {
+      if (isWslLauncher(shell)) {
+        return wslCommand(shell.path, command, workdir ?? policy?.workspaceRoot ?? process.cwd());
+      }
+      return [shell.path, '-c', command];
     }
 
     /**
@@ -623,13 +741,62 @@ async function shellSwitchExecutor() {
       const policy = spec.sandboxPolicy;
       if (policy?.mode === 'danger-full-access') {
         const { shell } = await this.current();
-        const execution = await this.executeArgv(spec, [shell.path, '-c', spec.command]);
+        const execution = await this.executeArgv(spec, this.argvFor(shell, spec.command, policy, spec.workdir));
         return SandboxBashExecutor.decorateResult(execution, (result) => ({
           ...result,
           sandbox: { mode: 'danger-full-access', denied: false },
         }));
       }
-      return super.execute(spec);
+      // Drive the confined path here instead of in the base class: the base
+      // calls its own `confine(command, policy, signal)` with no working
+      // directory, and the WSL launcher needs that directory translated. The
+      // rest of the flow mirrors the shipped SandboxBashExecutor.execute.
+      const { mode } = policy;
+      let confined;
+      const execution = await this.executeArgv(
+        spec,
+        async (signal) => {
+          const prepared = await this.confine(spec.command, { ...policy, mode }, signal, spec.workdir);
+          signal.throwIfAborted();
+          confined = prepared;
+          return prepared.argv;
+        },
+        (process) => {
+          const facts = confined;
+          if (facts === undefined) return;
+          this.processFacts.set(process, {
+            mode,
+            enforcement: facts.enforcement,
+            denialSignatures: facts.denialSignatures,
+            runnerFailureRules: facts.runnerFailureRules,
+            runnerProgram: facts.argv[0],
+            workdir: spec.workdir,
+          });
+        },
+      );
+      return SandboxBashExecutor.decorateResult(
+        execution,
+        (result) => {
+          if (confined === undefined) return { ...result, sandbox: { mode, denied: false } };
+          const runnerFailure = classifyRunnerFailure(result.exitCode, result.stderr.text, confined.runnerFailureRules);
+          if (runnerFailure !== undefined) throw new SandboxUnavailableError(mode, runnerFailure.detail);
+          return {
+            ...result,
+            sandbox: {
+              mode,
+              denied: classifyDenial(result, confined.denialSignatures),
+              enforcement: confined.enforcement,
+            },
+          };
+        },
+        (error) => {
+          if (spec.signal?.aborted === true) spec.signal.throwIfAborted();
+          if (confined !== undefined && isRunnerSpawnFailure(error, confined.argv[0], spec.workdir)) {
+            throw new SandboxUnavailableError(mode, String(error));
+          }
+          throw error;
+        },
+      );
     }
   };
   return ShellSwitchExecutor;
