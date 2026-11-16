@@ -261,11 +261,13 @@ Abridged `/state` example:
 
 Detection order (de-duplicated by real path):
 
-1. Registry `...\CurrentVersion\Uninstall` entries whose `DisplayName` matches `Niubash` / `Winuxsh` → `winuxcmd\usr\bin\bash.exe`, `winuxcmd\bin\bash.exe`, and so on;
+1. Registry `...\CurrentVersion\Uninstall`: `DisplayName` matching `Niubash` / `Winuxsh` → `winuxcmd\usr\bin\bash.exe` and friends; `DisplayName` of `Git version x.y.z` (Git for Windows' own name) → `bin\bash.exe`, `usr\bin\bash.exe`, `git-bash.exe`;
 2. Common Git for Windows locations (`Program Files`, `Program Files (x86)`, `LocalAppData\Programs`);
-3. `%SystemDrive%\msys64`, `msys32`, `cygwin64`, `cygwin`;
-4. `bash.exe`, `pwsh.exe` and `nu.exe` on `PATH`;
-5. Non-bash shells are listed but disabled: Niubash's `winuxsh.exe`, WSL `System32\bash.exe`, PowerShell 7 / 5.1, and `cmd.exe`.
+3. **Scoop and portable installs**: `$SCOOP\apps\git\<version>\bin\bash.exe` (a Scoop git lives outside the standard paths and usually has no uninstall entry, so the roots are probed directly; when `$SCOOP` is unset, `~/scoop`, `%SystemDrive%\scoop` and `%SystemDrive%\software\scoop` are tried too);
+4. `%SystemDrive%\msys64`, `msys32`, `cygwin64`, `cygwin`;
+5. `bash.exe`, `pwsh.exe` and `nu.exe` on `PATH`;
+6. **WSL distributions**: `wsl -l -v` produces one entry per distribution (`WSL · Ubuntu`, …), each probed for an actual `bash`; utility VMs such as `docker-desktop` are skipped;
+7. Non-bash shells are listed but disabled: Niubash's `winuxsh.exe`, PowerShell 7 / 5.1, `cmd.exe`, and any WSL distribution where the probe found no bash.
 
 Compatibility notes:
 
@@ -273,7 +275,9 @@ Compatibility notes:
 - **WSL bash** (`%SystemRoot%\System32\bash.exe`) is a bash dialect, but that binary is the WSL launcher: bash runs inside the distro, where `C:\` does not exist. Selecting it makes the plugin translate the working directory and any absolute Windows path written in the command to `/mnt/<drive>/...`, and start with a login shell (`-l`). Commands then work, with caveats:
   - only literal paths in the command are translated; runtime values (e.g. paths inside environment variables) are not;
   - file permissions, line endings and path case follow Linux semantics;
-  - a distro that actually ships bash is required (`wsl -l -v`); with only `docker-desktop` installed the command fails with `execvpe(/bin/bash) ... No such file or directory`;
+  - every distribution is its own entry (launched with `wsl -d <name> -e bash`), labelled with whether it is running;
+  - the plugin probes each distribution for `bash`, so one without it (for example a machine with only `docker-desktop`) is labelled "no bash" and cannot be selected — instead of failing later at command time with `execvpe(/bin/bash) ... No such file or directory`;
+  - a newly installed distribution appears after pressing Rescan (Rescan clears the WSL and registry caches);
 - Selecting a non-bash shell is rejected by the API (the tool only accepts bash syntax).
 
 ## Sandbox and permissions
@@ -286,7 +290,7 @@ Compatibility notes:
 ## Known limitations
 
 - Only the model-facing `bash` tool is affected; the **sidebar terminal** does not follow the choice.
-- Only bash dialects are supported; WSL / PowerShell / cmd are listed but cannot be selected.
+- Only bash dialects are supported; PowerShell / cmd are listed but cannot be selected (a WSL distribution can be selected, provided it actually contains bash).
 - The `pwsh` filter relies on a scope-level `tools.restrict`, therefore:
   - it applies to **existing sessions** from the next model request (not the one currently streaming);
   - disabling or removing the plugin restores `pwsh`.
@@ -316,7 +320,8 @@ Or disable the `shell-switch` row. After that:
 | "Cannot locate the DeepSeek Harness installation" | Set `DSH_INSTALL` to the DSH installation root and restart |
 | "No usable bash shell" | Pick one in Settings, or install Niubash / Git Bash / MSYS2 and press Rescan |
 | The selected entry is "not bash-compatible" | Choose a shell from the "Bash-compatible" group |
-| WSL bash reports `execvpe(/bin/bash)` | The default distro has no bash (e.g. only `docker-desktop` is installed); install a distro with bash and make it the default, or use Niubash/Git Bash |
+| A WSL distribution is labelled "no bash" and cannot be selected | That distro has no bash (e.g. `docker-desktop`); `wsl -d <name> -e bash -c 'exit 0'` fails there. Use a distro that ships bash, or Niubash / Git Bash |
+| A freshly installed Git Bash or WSL distro does not appear | Press Rescan; a Scoop git needs `$SCOOP` or a default scoop root, and WSL must list the distro in `wsl -l -v` |
 | A command reports a file denial | That is the session sandbox policy, not the plugin; follow DSH's permission guidance |
 | `pwsh` is still there | That session predates the filter: open a new session, or wait for the next model request to rebuild the catalog |
 

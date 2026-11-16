@@ -71,6 +71,28 @@ window.__ModuleLoader__.load({
       note: '说明',
     };
 
+    /**
+     * The `<option>` value for one shell. Several WSL distributions share one
+     * launcher path, so the distro name is part of the identity.
+     * @param {{ path?: string, distro?: string }} shell - a detected shell.
+     * @returns {string} the encoded option value.
+     */
+    function optionValue(shell) {
+      const base = String(shell?.path ?? '');
+      return typeof shell?.distro === 'string' && shell.distro.length > 0 ? `${base}#${shell.distro}` : base;
+    }
+
+    /**
+     * Split an `<option>` value back into the request body fields.
+     * @param {string} value - an encoded option value.
+     * @returns {{ path: string, distro?: string }} the selection payload.
+     */
+    function decodeOption(value) {
+      const index = String(value).indexOf('#');
+      if (index < 0) return { path: value };
+      return { path: value.slice(0, index), distro: value.slice(index + 1) };
+    }
+
     /** Resolve the API prefix against the page's base so sub-path deployments work. */
     function apiBase() {
       const fallback = '/api/dsh-shell-switch';
@@ -193,7 +215,7 @@ window.__ModuleLoader__.load({
           const next = await request('/select', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ path: draft }),
+            body: JSON.stringify(decodeOption(draft)),
           });
           setState(next);
           setDraft(next.selected?.path ?? next.effective?.path ?? draft);
@@ -232,18 +254,18 @@ window.__ModuleLoader__.load({
       const shells = Array.isArray(state.shells) ? state.shells : [];
       const compatible = shells.filter((shell) => shell.compatible === true);
       const others = shells.filter((shell) => shell.compatible !== true);
-      const dirty = draft !== (state.selected?.path ?? '');
-      const currentValue = state.selected?.path ?? '';
+      const currentValue = optionValue(state.selected ?? {});
+      const dirty = draft !== currentValue;
 
       const groups = [];
       if (compatible.length > 0) groups.push(h('optgroup', { key: 'compatible', label: t('compatible') },
-        compatible.map((shell) => h('option', { key: shell.path, value: shell.path },
+        compatible.map((shell) => h('option', { key: shell.path, value: optionValue(shell) },
           `${shell.label}${shell.version ? ` · ${shell.version}` : ''}${shell.note ? ` — ${shell.note}` : ''}`))));
       if (others.length > 0) groups.push(h('optgroup', { key: 'others', label: t('other') },
-        others.map((shell) => h('option', { key: shell.path, value: shell.path, disabled: true },
+        others.map((shell) => h('option', { key: shell.path, value: optionValue(shell), disabled: true },
           `${shell.label}（${t('incompatible')}）`))));
 
-      const selectedShell = shells.find((shell) => shell.path === currentValue) ?? null;
+      const selectedShell = shells.find((shell) => optionValue(shell) === currentValue) ?? null;
 
       return h('div', { style: styles.page },
         h('h2', { style: styles.title }, t('title')),

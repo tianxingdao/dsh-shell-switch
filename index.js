@@ -190,7 +190,11 @@ function readStore() {
       const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
       const candidate = parsed?.shell ?? parsed;
       if (typeof candidate?.path === 'string' && candidate.path.length > 0) {
-        shell = { path: candidate.path, at: candidate.at ?? parsed?.at };
+        shell = {
+          path: candidate.path,
+          ...typeof candidate.distro === 'string' && candidate.distro.length > 0 ? { distro: candidate.distro } : {},
+          at: candidate.at ?? parsed?.at,
+        };
       }
     } catch {
       // A corrupt file behaves like an empty one.
@@ -202,14 +206,20 @@ function readStore() {
 
 /**
  * Merge a patch into the store and persist it.
- * @param {{ shell?: { path: string, at?: string } | null }} patch - fields to replace.
+ * @param {{ shell?: { path: string, distro?: string, at?: string } | null }} patch - fields to replace.
  * @returns {{ shell: { path: string, at?: string } | null }} the new store.
  */
 function writeStore(patch) {
   const next = { ...readStore(), ...patch };
   const payload = next.shell === null || next.shell === undefined
     ? {}
-    : { shell: { path: next.shell.path, at: next.shell.at ?? new Date().toISOString() } };
+    : {
+        shell: {
+          path: next.shell.path,
+          ...typeof next.shell.distro === 'string' && next.shell.distro.length > 0 ? { distro: next.shell.distro } : {},
+          at: next.shell.at ?? new Date().toISOString(),
+        },
+      };
   const file = selectionFile();
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
@@ -220,7 +230,14 @@ function writeStore(patch) {
 /** The stored shell choice, if any. */
 const readSelection = () => readStore().shell;
 /** Remember one shell path. */
-const writeSelection = (shellPath) => writeStore({ shell: { path: shellPath, at: new Date().toISOString() } });
+const writeSelection = (shellPath, distro) =>
+  writeStore({
+    shell: {
+      path: shellPath,
+      ...distro === undefined ? {} : { distro },
+      at: new Date().toISOString(),
+    },
+  });
 /** Forget the shell choice. */
 const clearSelection = () => writeStore({ shell: null });
 
@@ -233,7 +250,7 @@ const clearSelection = () => writeStore({ shell: null });
  * minutes. The first page load may therefore show only the well-known and PATH
  * shells; the next refresh adds registered installs.
  * @param {boolean} [wait] - block until the scan finishes (only for explicit rescans).
- * @returns {string[]} install locations of shell-family programs.
+ * @returns {Array<{family: string, display: string, location: string}>} install locations of shell-family programs.
  */
 let registryCache = { at: 0, locations: [], promise: null };
 
@@ -258,9 +275,19 @@ function registryScan() {
       continue;
     }
     for (const block of output.split(/\r?\n\s*\r?\n/)) {
-      if (!/niubash|winuxsh/i.test(block)) continue;
+      // Both families matter: Niubash/Winuxsh for `winuxcmd`, Git for Windows
+      // (stored as "Git version 2.4x.x") for `bin`/`usr/bin`, which is how a
+      // scoop or portable install is found when it is not in a standard path.
+      const family = /niubash|winuxsh/i.test(block)
+        ? 'niubash'
+        : /displayname\s+REG_SZ\s+git version/i.test(block)
+          ? 'git'
+          : null;
+      if (family === null) continue;
+      const display = /DisplayName\s+REG_SZ\s+(.+)/i.exec(block)?.[1].trim() ?? family;
       const match = /InstallLocation\s+REG_SZ\s+(.+)/i.exec(block);
-      if (match !== null && match[1].trim().length > 0) locations.push(match[1].trim());
+      const location = match !== null && match[1].trim().length > 0 ? match[1].trim() : '';
+      if (location.length > 0) locations.push({ family, display, location });
     }
   }
   return { at: Date.now(), locations };
@@ -269,7 +296,7 @@ function registryScan() {
 /**
  * Non-blocking view of the registry scan: start one pass if the cache is cold,
  * return whatever is known right now.
- * @returns {string[]} cached install locations (empty while the first scan runs).
+ * @returns {Array<{family: string, display: string, location: string}>} cached install locations (empty while the first scan runs).
  */
 function uninstallLocations() {
   if (!isWin) return [];
@@ -297,6 +324,94 @@ async function uninstallLocationsSettled() {
   return registryCache.locations;
 }
 
+/**
+ * The WSL distributions installed on this machine, from `wsl -l -q`.
+ *
+ * `wsl.exe -l -q` writes UTF-16LE, so its output is decoded explicitly; a
+ * machine without WSL (or with only the `docker-desktop` utility distro)
+ * simply returns what it printed. Results are cached for ten minutes because
+ * the command spawns a process.
+ * @param {boolean} [refresh] - ignore the short-lived cache.
+ * @returns {Array<{name: string, running: boolean, bash: boolean|null}>} installed distributions;
+ *   `bash` is null until probed.
+ */
+let wslCache = { at: 0, distros: [] };
+
+function wslDistros(refresh = false) {
+  if (!isWin) return [];
+  if (!refresh && Date.now() - wslCache.at < 600000) return wslCache.distros;
+  let verbose = '';
+  try {
+    const raw = execFileSync('wsl.exe', ['-l', '-v'], {
+      encoding: 'buffer',
+      windowsHide: true,
+      timeout: 5000,
+      maxBuffer: 1024 * 1024,
+    });
+    verbose = raw.includes(0) ? raw.toString('utf16le') : raw.toString('utf8');
+  } catch {
+    verbose = '';
+  }
+  let distros = [];
+  if (verbose.length > 0) {
+    // Rows are "  NAME  STATE  VERSION", the default one prefixed by "*".
+    for (const line of verbose.split(/\r?\n/)) {
+      const match = /^\s*\*?\s*(\S+)\s+(Running|Stopped|Installing|Uninstalling)\b/i.exec(line.replace(/\u0000/g, ''));
+      if (match === null) continue;
+      if (/^docker-desktop/i.test(match[1])) continue; // utility distro, no bash
+      distros.push({ name: match[1], running: /^running$/i.test(match[2]), bash: null });
+    }
+  }
+  if (distros.length === 0) {
+    let quiet = '';
+    try {
+      const raw = execFileSync('wsl.exe', ['-l', '-q'], {
+        encoding: 'buffer',
+        windowsHide: true,
+        timeout: 5000,
+        maxBuffer: 1024 * 1024,
+      });
+      quiet = raw.includes(0) ? raw.toString('utf16le') : raw.toString('utf8');
+    } catch {
+      quiet = '';
+    }
+    distros = quiet
+      .split(/\r?\n/)
+      .map((line) => line.replace(/\u0000/g, '').replace(/^\*/, '').trim())
+      .filter((name) => name.length > 0 && !/^docker-desktop/i.test(name))
+      .map((name) => ({ name, running: false, bash: null }));
+  }
+  wslCache = { at: Date.now(), distros };
+  debug('wsl-distros', JSON.stringify(distros));
+  return distros;
+}
+
+/**
+ * Does one WSL distribution actually have bash?
+ *
+ * A distro can exist without it (`docker-desktop` is a utility VM), and that
+ * only surfaces at command time as `execvpe(/bin/bash) ... No such file`. One
+ * cheap probe moves that answer into the list instead. Results are cached with
+ * the distro cache; an unprobed or unknown result stays `null` and the entry is
+ * still offered.
+ * @param {{name: string, bash: boolean|null}} distro - a cached distro record.
+ * @returns {boolean|null} whether bash exists there.
+ */
+function probeDistroBash(distro) {
+  if (distro.bash !== null) return distro.bash;
+  try {
+    execFileSync('wsl.exe', ['-d', distro.name, '-e', 'bash', '-c', 'exit 0'], {
+      windowsHide: true,
+      timeout: 8000,
+      stdio: 'ignore',
+    });
+    distro.bash = true;
+  } catch {
+    distro.bash = false;
+  }
+  return distro.bash;
+}
+
 /** Well-known shell executables on Windows. */
 function knownShells() {
   const t0 = Date.now();
@@ -312,29 +427,44 @@ function knownShells() {
   const tReg = Date.now();
   const locations = uninstallLocations();
   debug('known-shells', 'registry=' + (Date.now() - tReg) + 'ms', 'locations=' + locations.length);
-  for (const location of locations) {
-    for (const relative of [
-      'winuxcmd\\usr\\bin\\bash.exe',
-      'winuxcmd\\bin\\bash.exe',
-      'usr\\bin\\bash.exe',
-      'bin\\bash.exe',
-      'bash.exe',
-    ]) {
+  for (const { family, display, location } of locations) {
+    if (family === 'niubash') {
+      for (const relative of [
+        'winuxcmd\\usr\\bin\\bash.exe',
+        'winuxcmd\\bin\\bash.exe',
+        'usr\\bin\\bash.exe',
+        'bin\\bash.exe',
+        'bash.exe',
+      ]) {
+        add(path.join(location, relative), {
+          id: 'niubash',
+          label: 'Niubash bash',
+          kind: 'bash',
+          compatible: true,
+          source: 'registry',
+        });
+      }
+      add(path.join(location, 'winuxsh.exe'), {
+        id: 'niubash-interactive',
+        label: 'Niubash winuxsh.exe',
+        kind: 'interactive',
+        compatible: false,
+        source: 'registry',
+      });
+      continue;
+    }
+    // Git for Windows: `bin\bash.exe` is the small launcher, `usr\bin\bash.exe`
+    // the real one; both work, the first is what Integrations register.
+    const version = /git version\s+([0-9][\w.]*)/i.exec(display)?.[1];
+    for (const relative of ['bin\\bash.exe', 'usr\\bin\\bash.exe', 'git-bash.exe']) {
       add(path.join(location, relative), {
-        id: 'niubash',
-        label: 'Niubash bash',
+        id: 'git-bash',
+        label: version === undefined ? 'Git Bash' : `Git Bash ${version}`,
         kind: 'bash',
         compatible: true,
         source: 'registry',
       });
     }
-    add(path.join(location, 'winuxsh.exe'), {
-      id: 'niubash-interactive',
-      label: 'Niubash winuxsh.exe',
-      kind: 'interactive',
-      compatible: false,
-      source: 'registry',
-    });
   }
 
   for (const candidate of [
@@ -344,6 +474,38 @@ function knownShells() {
     path.join(localAppData, 'Programs', 'Git', 'bin', 'bash.exe'),
   ]) {
     add(candidate, { id: 'git-bash', label: 'Git Bash', kind: 'bash', compatible: true, source: 'well-known' });
+  }
+
+  // Scoop and other portable layouts never register a `bash.exe` on PATH and
+  // often have no uninstall entry, so the known roots are probed directly:
+  // `<root>/apps/git/<version>/bin/bash.exe` plus the `current` junction that
+  // Scoop keeps. `SCOOP` is honoured when set; the default root is checked
+  // anyway, because Scoop is frequently installed without that variable.
+  for (const scoopRoot of [env.SCOOP, path.join(os.homedir(), 'scoop'), path.join(`${systemDrive}\\`, 'scoop'), path.join(`${systemDrive}\\`, 'software', 'scoop')]) {
+    if (typeof scoopRoot !== 'string' || scoopRoot.length === 0) continue;
+    const appsRoot = path.join(scoopRoot, 'apps', 'git');
+    let versions = [];
+    try {
+      versions = fs.readdirSync(appsRoot, { withFileTypes: true })
+        .filter((item) => item.isDirectory())
+        .map((item) => item.name)
+        // `current` is Scoop's junction to the active version: keep the real
+        // version directories first so the default entry names a version.
+        .sort((a, b) => (a === 'current' ? 1 : b === 'current' ? -1 : b.localeCompare(a, undefined, { numeric: true })));
+    } catch {
+      versions = [];
+    }
+    for (const version of versions) {
+      for (const relative of ['bin\\bash.exe', 'usr\\bin\\bash.exe']) {
+        add(path.join(appsRoot, version, relative), {
+          id: 'git-bash',
+          label: version === 'current' ? 'Git Bash (scoop)' : `Git Bash ${version} (scoop)`,
+          kind: 'bash',
+          compatible: true,
+          source: 'scoop',
+        });
+      }
+    }
   }
 
   for (const candidate of [
@@ -360,17 +522,40 @@ function knownShells() {
     add(candidate, { id: 'cygwin', label: 'Cygwin bash', kind: 'bash', compatible: true, source: 'well-known' });
   }
 
-  add(path.join(winRoot, 'System32', 'bash.exe'), {
-    id: 'wsl',
-    label: 'WSL bash',
-    kind: 'bash',
-    compatible: true,
-    source: 'well-known',
-    // `System32\bash.exe` is the WSL launcher: it runs bash inside the distro,
-    // so Windows paths must be translated. The note is shown next to it in the
-    // Settings page; the mapping itself happens in `wslCommand` below.
-    note: 'runs inside WSL: Windows paths are translated to /mnt/<drive>/...',
-  });
+  // One entry per WSL distribution when `wsl -l -q` answers, plus the default
+  // launcher. `System32\bash.exe` runs bash inside the default distro, so its
+  // Windows paths must be translated (see `wslCommand`); the per-distro entries
+  // go through `wsl -d <name> -e bash` and need the same translation.
+  const distros = wslDistros();
+  if (distros.length === 0) {
+    add(path.join(winRoot, 'System32', 'bash.exe'), {
+      id: 'wsl',
+      label: 'WSL bash',
+      kind: 'bash',
+      compatible: true,
+      source: 'well-known',
+      note: 'runs inside WSL: Windows paths are translated to /mnt/<drive>/...',
+    });
+  } else {
+    for (const distro of distros) {
+      add(path.join(winRoot, 'System32', 'bash.exe'), {
+        id: 'wsl',
+        distro: distro.name,
+        label:
+          distro.bash === false
+            ? `WSL · ${distro.name}（无 bash）`
+            : distro.running
+              ? `WSL · ${distro.name}`
+              : `WSL · ${distro.name}（未运行）`,
+        kind: 'bash',
+        // A distro without bash cannot run anything, so it is listed but not
+        // selectable; an unprobed distro stays selectable.
+        compatible: distro.bash !== false,
+        source: 'wsl',
+        note: `runs inside WSL distro \"${distro.name}\": Windows paths are translated to /mnt/<drive>/...`,
+      });
+    }
+  }
   add(path.join(programFiles, 'PowerShell', '7', 'pwsh.exe'), {
     id: 'pwsh',
     label: 'PowerShell 7',
@@ -442,6 +627,10 @@ let discovery = { at: 0, shells: [] };
  */
 async function discoverShells(refresh = false) {
   if (!refresh && Date.now() - discovery.at < 15000) return discovery.shells;
+  if (refresh) {
+    wslCache = { at: 0, distros: [] };
+    registryCache = { at: 0, locations: [], promise: null };
+  }
   // Wait for the registry scan only while it is on its very first pass: the
   // result is what lets a Niubash install be discovered at all, and waiting
   // once (a few seconds) is better than a list that silently misses it.
@@ -462,12 +651,16 @@ async function discoverShells(refresh = false) {
     } catch {
       continue;
     }
-    const key = real.toLowerCase();
+    // A per-distro WSL entry shares `System32\bash.exe` with every other
+    // distro, so the de-duplication key has to include the distro name. The
+    // `current` entry and the versioned entry resolve to the same real path.
+    const key = entry.distro === undefined ? real.toLowerCase() : `${real.toLowerCase()}#${String(entry.distro).toLowerCase()}`;
     if (seen.has(key)) continue;
     seen.add(key);
     shells.push({
       path: real,
       id: entry.id,
+      ...entry.distro === undefined ? {} : { distro: entry.distro },
       label: entry.label,
       kind: entry.kind,
       compatible: entry.compatible === true,
@@ -476,7 +669,34 @@ async function discoverShells(refresh = false) {
       version: '',
     });
   }
-  shells.sort((a, b) => Number(b.compatible) - Number(a.compatible) || a.label.localeCompare(b.label));
+  // Order: native bash on Windows first, then WSL distributions, then the rest;
+  // within a tier, raw installs before linked/duplicated ones, then by label.
+  // The first compatible entry is what `auto` picks, so this order decides the
+  // default — a native bash (Git Bash, Niubash) beats a WSL launcher.
+  const tier = (shell) => (isWslLauncher(shell) ? 2 : 1);
+  // `usr\bin` is the real bash; `bin` is the shim Git for Windows puts first on
+  // PATH. Prefer the real one when both resolve, so `auto` picks the same binary.
+  const shim = (shell) => (/[\\/]bin[\\/]bash\.exe$/i.test(shell.path) && !/[\\/]usr[\\/]bin[\\/]/i.test(shell.path) ? 1 : 0);
+  shells.sort((a, b) =>
+    Number(b.compatible) - Number(a.compatible)
+    || tier(a) - tier(b)
+    || shim(a) - shim(b)
+    || a.label.localeCompare(b.label, undefined, { numeric: true }));
+  // One row per shell, keyed by real path and distro. A Git install legitimately
+  // has both `bin\bash.exe` (the launcher shim) and `usr\bin\bash.exe` (the real
+  // one) pointing at different files, so those two stay separate only when they
+  // resolve differently — which they do; the `current` junction collapses into
+  // the versioned path earlier, at the realpath step.
+  const unique = [];
+  const seenKey = new Set();
+  for (const shell of shells) {
+    const key = `${shell.path.toLowerCase()}#${String(shell.distro ?? '').toLowerCase()}`;
+    if (seenKey.has(key)) continue;
+    seenKey.add(key);
+    unique.push(shell);
+  }
+  shells.length = 0;
+  shells.push(...unique);
   discovery = { at: Date.now(), shells };
   return shells;
 }
@@ -540,7 +760,7 @@ function withVersions(shells) {
 }
 
 /** Does this path name one of the detected shells? */
-function findByPath(shells, candidate) {
+function findByPath(shells, candidate, distro) {
   if (typeof candidate !== 'string' || candidate.length === 0) return undefined;
   let real;
   try {
@@ -548,8 +768,9 @@ function findByPath(shells, candidate) {
   } catch {
     return undefined;
   }
+  const sameDistro = (shell) => String(shell.distro ?? '') === String(distro ?? '');
   return (
-    shells.find((shell) => shell.path.toLowerCase() === real.toLowerCase()) ?? {
+    shells.find((shell) => shell.path.toLowerCase() === real.toLowerCase() && sameDistro(shell)) ?? {
       path: real,
       id: 'custom',
       label: path.basename(real),
@@ -573,7 +794,7 @@ function resolveShell(config, shells) {
   const configuredPath = String(valueOf(config.shellPath, '') ?? '');
   const configuredId = String(valueOf(config.shell, DEFAULT_SHELL) ?? DEFAULT_SHELL);
   if (selected !== null) {
-    const hit = findByPath(shells, selected.path);
+    const hit = findByPath(shells, selected.path, selected.distro);
     if (hit !== undefined) return { shell: hit, source: 'selection' };
     return {
       shell: shells.find((shell) => shell.compatible),
@@ -635,15 +856,17 @@ function toWslPath(value) {
  * @param {string} shellPath - the WSL launcher path.
  * @param {string} command - the bash command source.
  * @param {string} workdir - the host working directory.
+ * @param {string} [distro] - a specific distribution (`wsl -d`), or the default.
  * @returns {string[]} argv for the launcher.
  */
-function wslCommand(shellPath, command, workdir) {
+function wslCommand(shellPath, command, workdir, distro) {
   const translated = command.replace(
     /(^|[^\w:])([A-Za-z]):[\\/]([^\s'"`;|&<>()]*)/g,
     (_match, prefix, drive, rest) => `${prefix}/mnt/${drive.toLowerCase()}/${rest.replace(/\\/g, '/')}`,
   );
   const cd = `cd ${JSON.stringify(toWslPath(workdir))} 2>/dev/null || cd ~`;
-  return [shellPath, '-l', '-c', `${cd} && ${translated}`];
+  const target = typeof distro === 'string' && distro.length > 0 ? ['-d', distro] : [];
+  return [shellPath, ...target, '-l', '-c', `${cd} && ${translated}`];
 }
 
 /**
@@ -726,7 +949,7 @@ async function shellSwitchExecutor() {
      */
     argvFor(shell, command, policy, workdir) {
       if (isWslLauncher(shell)) {
-        return wslCommand(shell.path, command, workdir ?? policy?.workspaceRoot ?? process.cwd());
+        return wslCommand(shell.path, command, workdir ?? policy?.workspaceRoot ?? process.cwd(), shell.distro);
       }
       return [shell.path, '-c', command];
     }
@@ -882,6 +1105,7 @@ async function statePayload(ctx, config, refresh, settle = false) {
         ? null
         : {
             path: decision.shell.path,
+            ...decision.shell.distro === undefined ? {} : { distro: decision.shell.distro },
             label: decision.shell.label,
             kind: decision.shell.kind,
             version: decision.shell.version ?? '',
@@ -934,12 +1158,12 @@ function registerRoutes(ctx, config) {
             return json(res, 200, await statePayload(ctx, config, false));
           }
           const shells = await discoverShells(true);
-          const hit = findByPath(shells, body?.path);
+          const hit = findByPath(shells, body?.path, body?.distro);
           if (hit === undefined) return json(res, 400, { ok: false, error: `未找到该 shell：${String(body?.path ?? '')}` });
           if (hit.compatible !== true) {
             return json(res, 400, { ok: false, error: `${hit.label} 不是 bash 方言，无法执行 bash 命令` });
           }
-          writeSelection(hit.path);
+          writeSelection(hit.path, hit.distro);
           return json(res, 200, await statePayload(ctx, config, false));
         }
         return json(res, 404, { ok: false, error: 'not found' });
@@ -1095,18 +1319,34 @@ export function apply(ctx, config) {
   // Warm the registry scan and the version cache at mount so the first visit to
   // the Settings page is answered from cache instead of waiting for them.
   ctx.effect(() => {
+    let cancelled = false;
     uninstallLocations();
     const timer = setTimeout(() => {
-      try {
-        for (const shell of discovery.shells) {
-          if (shell.compatible) probeVersion(shell);
+      if (cancelled) return;
+      void (async () => {
+        try {
+          // Distro presence first: it decides which WSL entries exist and
+          // whether each can run bash at all.
+          const distros = wslDistros();
+          for (const distro of distros) probeDistroBash(distro);
+          if (cancelled) return;
+          const shells = await discoverShells(true);
+          for (const shell of shells) {
+            if (shell.compatible && isWslLauncher(shell) === false) probeVersion(shell);
+          }
+          if (cancelled) return;
+          // Drop the cached list so the page's next read reflects the probes.
+          discovery = { at: 0, shells: [] };
+        } catch {
+          // best effort
         }
-      } catch {
-        // best effort
-      }
+      })();
     }, 1500);
     timer.unref?.();
-    return () => clearTimeout(timer);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
   }, 'dsh-shell-switch: shell cache warm-up');
   debug('row-apply');
 }

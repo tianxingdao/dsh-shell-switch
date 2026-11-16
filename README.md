@@ -259,11 +259,13 @@ Host 内部接口，仅同源页面可访问（供设置页使用；通过局域
 
 检测顺序（按真实路径去重）：
 
-1. 注册表 `...\CurrentVersion\Uninstall` 中 `DisplayName` 含 `Niubash` / `Winuxsh` 的 `InstallLocation` → `winuxcmd\usr\bin\bash.exe`、`winuxcmd\bin\bash.exe` 等；
+1. 注册表 `...\CurrentVersion\Uninstall`：`DisplayName` 含 `Niubash` / `Winuxsh` 的 `InstallLocation` → `winuxcmd\usr\bin\bash.exe` 等；`DisplayName` 为 `Git version x.y.z`（Git for Windows 的注册名）的 `InstallLocation` → `bin\bash.exe`、`usr\bin\bash.exe`、`git-bash.exe`；
 2. Git for Windows 常见位置（`Program Files`、`Program Files (x86)`、`LocalAppData\Programs`）；
-3. `%SystemDrive%\msys64`、`msys32`、`cygwin64`、`cygwin`；
-4. `PATH` 里的 `bash.exe`、`pwsh.exe`、`nu.exe`；
-5. 非 bash 方言也会列出但禁用：Niubash 的 `winuxsh.exe`、WSL `System32\bash.exe`、PowerShell 7 / 5.1、`cmd.exe`。
+3. **Scoop / 便携安装**：`$SCOOP\apps\git\<版本>\bin\bash.exe`（Scoop 的 git 既不在标准路径、也常常没有卸载项，因此按目录直接探测；`$SCOOP` 未设置时还会试 `~/scoop`、`%SystemDrive%\scoop`、`%SystemDrive%\software\scoop`）；
+4. `%SystemDrive%\msys64`、`msys32`、`cygwin64`、`cygwin`；
+5. `PATH` 里的 `bash.exe`、`pwsh.exe`、`nu.exe`；
+6. **WSL 发行版**：执行 `wsl -l -v` 为每个发行版生成一项（`WSL · Ubuntu` 等），并探测该发行版里是否真的存在 `bash`；`docker-desktop` 这类工具 VM 自动跳过；
+7. 非 bash 方言也会列出但禁用：Niubash 的 `winuxsh.exe`、PowerShell 7 / 5.1、`cmd.exe`，以及探测出没有 bash 的 WSL 发行版。
 
 兼容性说明：
 
@@ -271,7 +273,9 @@ Host 内部接口，仅同源页面可访问（供设置页使用；通过局域
 - **WSL bash**（`%SystemRoot%\System32\bash.exe`）是 bash 方言，但它是 WSL 启动器：bash 跑在发行版里，`C:\` 在那里不存在。选中它时插件会做两件事——把工作目录和命令中出现的绝对 Windows 路径翻译成 `/mnt/<盘符>/...`，并用 `-l` 登录 shell 启动。因此命令能正常执行，但：
   - 只能用命令行里写死的路径，插件不翻译 `workdir` 之外的运行时值（如环境变量里的路径）；
   - 文件权限、行尾、路径大小写遵循 Linux 语义；
-  - 需要确实装有一个带 bash 的发行版（`wsl -l -v` 查看）；只有 `docker-desktop` 这类没有 bash 的发行版时，选中它会在命令阶段报 `execvpe(/bin/bash) ... No such file or directory`。
+  - 每个发行版独立成项（走 `wsl -d <名称> -e bash`），列表里会标注是否运行中；
+  - 插件会探测发行版里有没有 `bash`：没有的（例如只有 `docker-desktop`）标注「无 bash」并禁止选择，而不是等到执行时才报 `execvpe(/bin/bash) ... No such file or directory`；
+  - 装了新发行版后点「重新扫描」即可出现（重扫会清空 WSL 与注册表缓存）。
 - 选中非 bash 方言会被接口拒绝（该工具只接受 bash 语法）。
 
 ## 沙箱与权限
@@ -284,7 +288,7 @@ Host 内部接口，仅同源页面可访问（供设置页使用；通过局域
 ## 已知限制
 
 - 只影响模型侧的 `bash` 工具；**侧边栏终端**不跟随该选择。
-- 只支持 bash 方言；WSL / PowerShell / cmd 只能展示，不能选。
+- 只支持 bash 方言；PowerShell / cmd 只能展示，不能选（WSL 发行版可选中，但要求其内部有 bash）。
 - `pwsh` 屏蔽依赖 Agent 作用域的 `tools.restrict`，所以：
   - 对**已存在的会话**在下一条模型请求生效（不是当前正在流式输出的那条）；
   - 插件被停用/卸载后自动恢复。
@@ -314,7 +318,8 @@ plugin_manager remove_bundle  target = dsh-shell-switch
 | 报错找不到 DSH 安装 | 设置环境变量 `DSH_INSTALL` 指向 DSH 安装根目录后重启 |
 | 报错「没有可用的 bash shell」 | 在设置页选择，或安装 Niubash/Git Bash/MSYS2 后点「重新扫描」 |
 | 选中项显示「不是 bash 方言」 | 换一个「可用于 bash」分组里的 shell |
-| 选了 WSL bash 后报 `execvpe(/bin/bash)` | 当前默认发行版里没有 bash（例如只装了 docker-desktop）；装一个带 bash 的发行版并设为默认，或改用 Niubash/Git Bash |
+| 某个 WSL 发行版标注「无 bash」且不能选 | 该发行版里没有 bash（例如 `docker-desktop`）；`wsl -d <名称> -e bash -c 'exit 0'` 会失败。换一个带 bash 的发行版，或改用 Niubash / Git Bash |
+| 刚装的 Git Bash / WSL 发行版没出现 | 点「重新扫描」；Scoop 的 git 需要 `$SCOOP` 或默认 scoop 目录，WSL 需要 `wsl -l -v` 能列出它 |
 | 命令报文件拒绝 | 属于会话沙箱策略，不是插件；按 DSH 的权限提示处理 |
 | pwsh 还在 | 该会话是在屏蔽前创建的：新开一个会话，或等下一次模型请求重算工具目录 |
 
