@@ -73,14 +73,16 @@ const loadShipped = (id) => import(pathToFileURL(dsh.resolve(id)).href);
  * Loading is deferred until {@link shipped} is first awaited: creating an
  * Agent must not pay for three dynamic imports, and only attaching an Agent
  * actually needs these modules. A second Agent reuses the same promise.
- * @returns {Promise<{ SandboxBashExecutor: Function, toolBash: object }>} the loaded modules.
+ * @returns {Promise<{ SandboxBashExecutor: Function, toolBash: object, toolPwsh: object }>} the loaded modules.
  */
 let shippedPromise;
 function shipped() {
   shippedPromise ??= Promise.all([
     loadShipped('@deepseek-ai/dsh-bash-sandbox'),
     loadShipped('@deepseek-ai/dsh-tool-bash'),
-  ]).then(async ([sandbox, tool]) => {
+    // The official PowerShell tool, used when a PowerShell shell is selected.
+    loadShipped('@deepseek-ai/dsh-tool-pwsh'),
+  ]).then(async ([sandbox, tool, pwshTool]) => {
     // The confined path is driven locally (see the executor below), so it also
     // needs the diagnostics the shipped executor imports from dsh-sandbox.
     const diagnostics = await loadShipped('@deepseek-ai/dsh-sandbox');
@@ -91,6 +93,7 @@ function shipped() {
       isRunnerSpawnFailure: diagnostics.isRunnerSpawnFailure,
       sandboxDenialMarker: diagnostics.sandboxDenialMarker,
       toolBash: tool,
+      toolPwsh: pwshTool,
     };
   });
   return shippedPromise;
@@ -1278,6 +1281,7 @@ function registerRoutes(ctx, config) {
           }
           if (body?.action === 'reset') {
             clearSelection();
+            refilterTools();
             return json(res, 200, await statePayload(ctx, config, false));
           }
           const shells = await discoverShells(true);
@@ -1287,6 +1291,7 @@ function registerRoutes(ctx, config) {
             return json(res, 400, { ok: false, error: `${hit.label} 不是 bash 方言，无法执行 bash 命令` });
           }
           writeSelection(hit.path, hit.distro);
+          refilterTools();
           return json(res, 200, await statePayload(ctx, config, false));
         }
         return json(res, 404, { ok: false, error: 'not found' });
@@ -1306,38 +1311,117 @@ export const name = 'shell-switch';
 export const inject = ['webServer', 'subprocess', 'sandbox', 'sandboxPolicy'];
 
 /** Mount-time facts the settings page surfaces when a mount fails. */
-const diagnostics = { tool: 'idle', attached: 0, restricted: 0, error: null, pwshError: null };
+const diagnostics = { tool: 'idle', attached: 0, restricted: 0, pending: 0, error: null, pwshError: null };
 const attached = new WeakMap();
+/** Every Agent currently mounted, so a selection change can re-filter tools. */
+const liveAgents = new Set();
 /** Agent → disposer of the `pwsh` deny filter this plugin installed. */
 const pwshFilters = new WeakMap();
 
 /**
- * Hide the shipped `pwsh` tool for one Agent on Windows.
+ * Make exactly one shell tool visible for one Agent.
  *
- * The tool belongs to the Agent's preset, so it cannot be uninstalled; a
- * scope-level deny filter removes it from the model's catalog while leaving the
- * tool row itself untouched. Other platforms never compose `pwsh`, so nothing
- * is filtered there. Removing or disabling this plugin releases the filter and
- * brings `pwsh` back.
+ * Both tools are mounted on the Agent's scope: `bash` (this plugin's executor,
+ * which runs whatever shell is selected) and the official `pwsh`. Depending on
+ * the selection one of them is hidden again:
+ *
+ * - a bash-family shell (Git Bash, Niubash, MSYS2, WSL, ...): hide `pwsh`, so
+ *   `bash` is the only shell tool and commands are bash;
+ * - a PowerShell selection: hide `bash`, so the official `pwsh` tool is the
+ *   only shell tool and commands are PowerShell, with its own params, sandbox
+ *   facts and prompt guidance.
+ *
+ * `tools.restrict()` can only name tools that already exist in the scope, so
+ * the filter is (re)applied after the tools mount; an Agent whose filter could
+ * not be installed yet is retried rather than left with both tools visible.
  * @param {object} agent - the Agent whose catalog is adjusted.
+ * @param {boolean} [retry] - schedule a retry when the named tool is missing.
  */
-function applyPwshPolicy(agent) {
+function applyPwshPolicy(agent, retry = true, scope = undefined) {
   if (!isWin) return;
   if (agent === null || agent === undefined || agent.ctx === undefined) return;
-  if (pwshFilters.has(agent)) return;
+  // `restrict()` only masks *global* tools; scope-local registrations stay
+  // visible, and this plugin mounts both tools inside the Agent's own shell
+  // scope. So the deny filter belongs on the Agent scope, one level above that
+  // scope, where both tools are seen as visible globals.
+  const target = agent.ctx;
+  const existing = pwshFilters.get(agent);
+  if (existing !== undefined) {
+    try {
+      existing();
+    } catch {
+      // already released
+    }
+    pwshFilters.delete(agent);
+    diagnostics.restricted = Math.max(0, diagnostics.restricted - 1);
+  }
+  const powerShellSelected = wantPowerShellTool();
+  const hidden = powerShellSelected ? 'bash' : 'pwsh';
   try {
-    const dispose = agent.ctx.tools.restrict({ deny: ['pwsh'] });
+    const dispose = target.tools.restrict({ deny: [hidden] });
     pwshFilters.set(agent, dispose);
     diagnostics.restricted += 1;
     diagnostics.pwshError = null;
-    debug('pwsh-hidden', agent.id ?? 'unknown');
+    diagnostics.pending = 0;
+    debug('tool-filter', `deny=${hidden}`, agent.id ?? 'unknown');
   } catch (error) {
-    diagnostics.pwshError = String(error?.message ?? error);
-    debug('pwsh-hide-failed', diagnostics.pwshError);
+    const message = String(error?.message ?? error);
+    if (/unknown global tool/i.test(message)) {
+      // The tools are still mounting; retry shortly rather than leave the
+      // Agent with two shell tools.
+      diagnostics.pending = (diagnostics.pending ?? 0) + 1;
+      debug('tool-filter-pending', `deny=${hidden}`, agent.id ?? 'unknown');
+      if (retry) {
+        const timer = setTimeout(() => applyPwshPolicy(agent, false, scope), 1500);
+        timer.unref?.();
+      }
+      return;
+    }
+    diagnostics.pwshError = message;
+    debug('tool-filter-failed', message.slice(0, 300));
   }
 }
 
-/** Remove one Agent's `pwsh` deny filter, if this plugin installed it. */
+/**
+ * Should the official `pwsh` tool be the visible one?
+ *
+ * Decided from the resolved shell: a PowerShell choice is identified by the
+ * entry it resolves to (its dialect). Before the first discovery the list is
+ * empty, so the stored path is inspected instead — it names
+ * `pwsh.exe`/`powershell.exe` exactly when the user picked a PowerShell.
+ * @returns {boolean} true when PowerShell is selected.
+ */
+function wantPowerShellTool() {
+  try {
+    const chosen = readSelection();
+    // The stored choice is authoritative and always available: a PowerShell
+    // pick names a `pwsh.exe`/`powershell.exe` path, a bash pick does not.
+    if (chosen !== null) {
+      const stored = discovery.shells.find(
+        (shell) => shell.path.toLowerCase() === String(chosen.path).toLowerCase(),
+      );
+      if (stored !== undefined) return isPowerShell(stored);
+      return /[/\\](pwsh|powershell)\.exe$/i.test(String(chosen.path ?? ''));
+    }
+    if (discovery.shells.length === 0) return false;
+    const selected = resolveShell(executorConfig({}), discovery.shells);
+    return isPowerShell(selected.shell ?? {});
+  } catch {
+    return false;
+  }
+}
+
+/** Filter tools from the Agent's inner shell scope, where they were mounted. */
+function applyToolsFilter(agent, scope) {
+  applyPwshPolicy(agent, true, scope);
+}
+
+/** Re-apply the tool filter to every mounted Agent after a selection change. */
+function refilterTools() {
+  for (const agent of liveAgents) applyPwshPolicy(agent);
+}
+
+/** Remove one Agent's tool deny filter, if this plugin installed it. */
 function releasePwshPolicy(agent) {
   const dispose = pwshFilters.get(agent);
   if (dispose === undefined) return;
@@ -1367,26 +1451,51 @@ function attachAgent(ctx, config, agent) {
       inject: ['subprocess', 'sandbox', 'sandboxPolicy'],
       async apply(inner) {
         // Deferred here so creating an Agent costs nothing until it really needs
-        // the bash tool; both calls are memoized after the first Agent.
-        const [Executor, tool] = await Promise.all([shellSwitchExecutor(), shipped().then((m) => m.toolBash)]);
+        // a shell tool; every call is memoized after the first Agent.
+        //
+        // Both tools are mounted: `bash` is powered by this plugin's executor
+        // (any shell the user selects), and `pwsh` is the official PowerShell
+        // tool. Which one the model sees is decided by a scope filter below, so
+        // switching the selection in Settings takes effect without a remount.
+        const [Executor, modules] = await Promise.all([shellSwitchExecutor(), shipped()]);
         new Executor(inner, executorConfig(config));
-        const toolFiber = inner.plugin(tool, { enableRunInBackground: true });
-        Promise.resolve(toolFiber).then(
-          () => {
-            diagnostics.tool = 'active';
-            debug('tool-active', agent.id ?? 'unknown');
-          },
-          (error) => {
-            diagnostics.tool = 'failed';
-            diagnostics.error = String(error?.stack ?? error);
-            debug('tool-failed', diagnostics.error);
-          },
-        );
+        // One tool per dialect, and only the one this selection needs: `bash`
+        // runs a bash-family shell, the official `pwsh` tool is used for a
+        // PowerShell selection. Mounting the unused one and hiding it would
+        // need a deny filter, which cannot mask scope-local tools.
+        const wantPwsh = wantPowerShellTool();
+        const tools = wantPwsh
+          ? [[modules.toolPwsh, 'pwsh', undefined]]
+          : [[modules.toolBash, 'bash', { enableRunInBackground: true }]];
+        const mounted = [];
+        for (const [tool, label, toolConfig] of tools) {
+          const toolFiber = inner.plugin(tool, toolConfig);
+          mounted.push(Promise.resolve(toolFiber).then(
+            () => {
+              diagnostics.tool = 'active';
+              debug('tool-active', label, agent.id ?? 'unknown');
+            },
+            (error) => {
+              diagnostics.tool = 'failed';
+              diagnostics.error = `[${label}] ${String(error?.stack ?? error)}`;
+              debug('tool-failed', label, diagnostics.error);
+            },
+          ));
+        }
+        // Only now can a filter name both tools, so the visible one is chosen
+        // once the mounts settle rather than at Agent creation. The mount
+        // itself is awaited by the fiber, so the filter runs just after this
+        // apply returns.
+        await Promise.all(mounted);
       },
     });
     attached.set(agent, fiber);
+    liveAgents.add(agent);
     diagnostics.attached += 1;
-    applyPwshPolicy(agent);
+    // A bash-family selection must also hide the *preset's* own `pwsh` tool;
+    // a PowerShell selection keeps it and mounts its own copy only if the
+    // preset does not provide one (see the mount above).
+    if (!wantPowerShellTool()) applyPwshPolicy(agent);
   } catch (error) {
     diagnostics.tool = 'threw';
     diagnostics.error = String(error?.stack ?? error);
@@ -1397,6 +1506,7 @@ function attachAgent(ctx, config, agent) {
 /** Drop one Agent's scope, executor, and tool. */
 function detachAgent(agent) {
   releasePwshPolicy(agent);
+  liveAgents.delete(agent);
   const fiber = attached.get(agent);
   if (fiber === undefined) return;
   attached.delete(agent);
