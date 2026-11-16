@@ -720,15 +720,35 @@ async function discoverShells(refresh = false) {
     || tier(a) - tier(b)
     || shim(a) - shim(b)
     || a.label.localeCompare(b.label, undefined, { numeric: true }));
-  // One row per shell, keyed by real path and distro. A Git install legitimately
-  // has both `bin\bash.exe` (the launcher shim) and `usr\bin\bash.exe` (the real
-  // one) pointing at different files, so those two stay separate only when they
-  // resolve differently — which they do; the `current` junction collapses into
-  // the versioned path earlier, at the realpath step.
+  // One row per *install*, not per file. A single installation ships two
+  // `bash.exe` files: `<root>\usr\bin\bash.exe` (the real one) and
+  // `<root>\bin\bash.exe` (a launcher shim, or a plain copy as Niubash does).
+  // Listing both is noise — they are the same shell — so the list is keyed by
+  // installation root plus distro, and the sort above already puts `usr\bin`
+  // first, which makes it the row that survives.
+  const installKey = (shell) => {
+    // Collapse the two bash files of one installation:
+    // `<root>\usr\bin\bash.exe` and `<root>\bin\bash.exe` -> `<root>`.
+    // Anything else (PowerShell, cmd, nushell, the WSL launcher) keeps its own
+    // file identity, because those neighbours are different programs that
+    // happen to live in one directory.
+    let dir = path.dirname(shell.path.toLowerCase());
+    const isBash = /[\\/]bash\.exe$/.test(shell.path.toLowerCase());
+    if (isBash) {
+      if (path.basename(dir) === 'bin') {
+        const parent = path.dirname(dir);
+        dir = path.basename(parent) === 'usr' ? path.dirname(parent) : parent;
+      }
+    }
+    const identity = isBash ? dir : shell.path.toLowerCase();
+    return `${identity}#${String(shell.distro ?? '').toLowerCase()}`;
+  };
   const unique = [];
   const seenKey = new Set();
   for (const shell of shells) {
-    const key = `${shell.path.toLowerCase()}#${String(shell.distro ?? '').toLowerCase()}`;
+    // Non-bash rows keep their own identity so e.g. `winuxsh.exe` next to the
+    // bash entries of the same install is not swallowed.
+    const key = shell.compatible ? installKey(shell) : shell.path.toLowerCase();
     if (seenKey.has(key)) continue;
     seenKey.add(key);
     unique.push(shell);
