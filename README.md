@@ -155,12 +155,28 @@ bash: {
 - **恢复默认**：清除选择，回落到插件配置的 `shell` / `shellPath` / 自动检测；
 - **重新扫描**：完整重扫注册表并刷新版本（装了新 shell 后点一下；这一次会等待扫描完成，其余时刻都走缓存）。
 
+### 选择 PowerShell（Windows）
+
+下拉框第三组「PowerShell（命令需为 PowerShell 语法）」里可以选择 PowerShell，此时 `bash` 工具改用该 PowerShell 执行命令。注意语义变化：
+
+- **命令必须是 PowerShell 语法**。`echo hi` 仍能工作（`echo` 是 `Write-Output` 的别名），但 `pwd` 返回的是 `Get-Location` 的表对象、`ls` 是 `Get-ChildItem`，管道语义也按 PowerShell 走；写 bash 语法会得到 PowerShell 的报错或意外结果；
+- 支持 PowerShell 7（`pwsh.exe`，含 Microsoft Store 别名）与 Windows PowerShell 5.1；未安装 PowerShell 7 时 5.1 也能选，但缺少 `&&` 等新特性；
+- 实现方式参考 [@4fu/pi-pwsh](https://pi.dev/packages/@4fu/pi-pwsh)：UTF-8 源码经 stdin 以 base64 传入（不拼进命令行，避免引用错误被当成命令执行），`-NoLogo -NoProfile -NonInteractive`，并在执行前把 `$OutputEncoding` / `[Console]::OutputEncoding` 设为无 BOM 的 UTF-8，避免中文路径或原生程序输出乱码；
+- 想保留自己的 `$PROFILE`：把插件配置 `loadProfile` 设为 `true`（默认 `false`，以免个人配置影响工具输出）。
+
+切换用法：
+
+```text
+设置 → Shell → PowerShell 分组 → 选一个 → 保存
+```
+
 ### 隐藏 `pwsh`（Windows）
 
-本插件启用期间，Windows 下每个 Agent 的工具列表都会去掉 `pwsh`。这不是改组合、也不是卸载官方插件，而是在 Agent 作用域上加一条 deny 过滤，随插件卸载释放。
+本插件启用期间，Windows 下每个 Agent 的工具列表都会去掉官方 `pwsh` 工具。这不是改组合、也不是卸载官方插件，而是在 Agent 作用域上加一条 deny 过滤，随插件卸载释放。
 
 - 现存与新建 Agent 都生效，下一条模型请求即可看到新工具列表；
-- 想恢复：**停用或卸载本插件**。
+- 想恢复：**停用或卸载本插件**；
+- 若你在上面选择了 PowerShell 作为 shell，插件会用 `bash` 这个名字执行 PowerShell，官方 `pwsh` 依旧隐藏，因此模型只会看到一个 shell 工具。
 
 ## 工作原理
 
@@ -216,6 +232,7 @@ profile patch 中的 `shell-switch` 行：
 | `maxOutputBytes` | `64000` | 单流输出内存上限，超出转存 spill 文件 |
 | `maxSpillBytes` | `67108864` | spill 文件上限 |
 | `graceMs` | `3000` | 终止到强杀的宽限期 |
+| `loadProfile` | `false` | 选择 PowerShell 时是否加载用户的 `$PROFILE` |
 
 选择优先级：设置页保存的路径 → `shellPath` → `shell` → 自动检测。
 
@@ -265,7 +282,8 @@ Host 内部接口，仅同源页面可访问（供设置页使用；通过局域
 4. `%SystemDrive%\msys64`、`msys32`、`cygwin64`、`cygwin`；
 5. `PATH` 里的 `bash.exe`、`pwsh.exe`、`nu.exe`；
 6. **WSL 发行版**：执行 `wsl -l -v` 为每个发行版生成一项（`WSL · Ubuntu` 等），并探测该发行版里是否真的存在 `bash`；`docker-desktop` 这类工具 VM 自动跳过；
-7. 非 bash 方言也会列出但禁用：Niubash 的 `winuxsh.exe`、PowerShell 7 / 5.1、`cmd.exe`，以及探测出没有 bash 的 WSL 发行版。
+7. PowerShell 7 / 7-preview（含 Microsoft Store 的 `pwsh.exe` 别名）与 Windows PowerShell 5.1 单独成组、可选中；
+8. 其余方言只列出并禁用：Niubash 的 `winuxsh.exe`、`cmd.exe`，以及探测出没有 bash 的 WSL 发行版。
 
 兼容性说明：
 
@@ -288,7 +306,8 @@ Host 内部接口，仅同源页面可访问（供设置页使用；通过局域
 ## 已知限制
 
 - 只影响模型侧的 `bash` 工具；**侧边栏终端**不跟随该选择。
-- 只支持 bash 方言；PowerShell / cmd 只能展示，不能选（WSL 发行版可选中，但要求其内部有 bash）。
+- 支持 bash 方言（含 WSL 发行版，要求其内部有 bash）与 PowerShell（7 或 5.1）；`cmd.exe`、`winuxsh.exe` 只能展示，不能选。
+- 选择 PowerShell 后，工具名仍是 `bash`，但语法要求变成 PowerShell —— 提示词和技能里写 bash 的地方需要相应调整。
 - `pwsh` 屏蔽依赖 Agent 作用域的 `tools.restrict`，所以：
   - 对**已存在的会话**在下一条模型请求生效（不是当前正在流式输出的那条）；
   - 插件被停用/卸载后自动恢复。

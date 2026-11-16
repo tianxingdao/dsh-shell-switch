@@ -157,12 +157,28 @@ bash: {
 - **Reset** clears the choice and falls back to the plugin's `shell` / `shellPath` / auto-detection;
 - **Rescan** re-reads the registry and refreshes versions (useful after installing a new shell; this one waits for the scan, every other call is served from cache).
 
+### Choosing PowerShell (Windows)
+
+The third group in the dropdown, **PowerShell (commands must be PowerShell syntax)**, lets the `bash` tool run its commands through PowerShell instead. The semantics change:
+
+- **commands must be PowerShell syntax**. `echo hi` still works (`echo` is an alias of `Write-Output`), but `pwd` returns a `Get-Location` table object, `ls` is `Get-ChildItem`, and pipelines follow PowerShell rules; bash syntax produces PowerShell errors or surprising output;
+- PowerShell 7 (`pwsh.exe`, including the Microsoft Store alias) and Windows PowerShell 5.1 are both offered; without PowerShell 7 the 5.1 entry works but lacks `&&` and other new features;
+- the transport follows [@4fu/pi-pwsh](https://pi.dev/packages/@4fu/pi-pwsh): UTF-8 source is sent to stdin as base64 (never spliced into the command line, so a quoting mistake cannot execute half a command), with `-NoLogo -NoProfile -NonInteractive`, and `$OutputEncoding` / `[Console]::OutputEncoding` are set to BOM-less UTF-8 first so non-ASCII paths and native output are not mangled;
+- to keep your own `$PROFILE`, set the plugin's `loadProfile` to `true` (default `false`, so a personal profile cannot pollute tool output).
+
+To switch:
+
+```text
+Settings → Shell → PowerShell group → pick one → Save
+```
+
 ### Hiding `pwsh` (Windows)
 
-While this plugin is active, every Agent's tool list omits `pwsh` on Windows. This is not a composition edit and not an uninstall of the official plugin: it is a scope-level deny filter released when the plugin is disabled.
+While this plugin is active, every Agent's tool list omits the official `pwsh` tool on Windows. This is not a composition edit and not an uninstall of the official plugin: it is a scope-level deny filter released when the plugin is disabled.
 
 - Applies to existing and future Agents; the next model request sees the new catalog;
-- To restore it: **disable or remove this plugin**.
+- To restore it: **disable or remove this plugin**;
+- if you selected PowerShell as the shell above, that PowerShell runs under the `bash` tool name while the official `pwsh` stays hidden, so the model still sees exactly one shell tool.
 
 ## How it works
 
@@ -218,6 +234,7 @@ The `shell-switch` row in the profile patch:
 | `maxOutputBytes` | `64000` | In-memory cap per stream; beyond it output spills to a file |
 | `maxSpillBytes` | `67108864` | Spill-file cap |
 | `graceMs` | `3000` | Grace period between termination and a forced kill |
+| `loadProfile` | `false` | Load the user's `$PROFILE` when PowerShell is the selected shell |
 
 Resolution order: the Settings choice → `shellPath` → `shell` → auto-detection.
 
@@ -267,7 +284,8 @@ Detection order (de-duplicated by real path):
 4. `%SystemDrive%\msys64`, `msys32`, `cygwin64`, `cygwin`;
 5. `bash.exe`, `pwsh.exe` and `nu.exe` on `PATH`;
 6. **WSL distributions**: `wsl -l -v` produces one entry per distribution (`WSL · Ubuntu`, …), each probed for an actual `bash`; utility VMs such as `docker-desktop` are skipped;
-7. Non-bash shells are listed but disabled: Niubash's `winuxsh.exe`, PowerShell 7 / 5.1, `cmd.exe`, and any WSL distribution where the probe found no bash.
+7. PowerShell 7 / 7-preview (including the Microsoft Store `pwsh.exe` alias) and Windows PowerShell 5.1 form their own selectable group;
+8. remaining dialects are listed but disabled: Niubash's `winuxsh.exe`, `cmd.exe`, and any WSL distribution where the probe found no bash.
 
 Compatibility notes:
 
@@ -290,7 +308,8 @@ Compatibility notes:
 ## Known limitations
 
 - Only the model-facing `bash` tool is affected; the **sidebar terminal** does not follow the choice.
-- Only bash dialects are supported; PowerShell / cmd are listed but cannot be selected (a WSL distribution can be selected, provided it actually contains bash).
+- Bash dialects (including WSL distributions that actually contain bash) and PowerShell (7 or 5.1) can be selected; `cmd.exe` and `winuxsh.exe` are listed but cannot be.
+- With PowerShell selected, the tool name is still `bash` but the syntax requirement becomes PowerShell — prompts and skills written for bash need adjusting.
 - The `pwsh` filter relies on a scope-level `tools.restrict`, therefore:
   - it applies to **existing sessions** from the next model request (not the one currently streaming);
   - disabling or removing the plugin restores `pwsh`.

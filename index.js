@@ -115,6 +115,8 @@ export const Config = z.object({
   maxOutputBytes: z.number().default(64000).volatile(),
   maxSpillBytes: z.number().default(64 * 1024 * 1024).volatile(),
   graceMs: z.number().default(3000).volatile(),
+  /** Load the user's PowerShell profile for PowerShell commands (default: no). */
+  loadProfile: z.boolean().default(false).volatile(),
 });
 
 /** Append one line to a debug log; diagnostics must never break activation. */
@@ -156,6 +158,7 @@ function executorConfig(config) {
     maxOutputBytes: cell(config?.maxOutputBytes, 64000),
     maxSpillBytes: cell(config?.maxSpillBytes, 64 * 1024 * 1024),
     graceMs: cell(config?.graceMs, 3000),
+    loadProfile: cell(config?.loadProfile, false),
   };
 }
 
@@ -560,21 +563,24 @@ function knownShells() {
     id: 'pwsh',
     label: 'PowerShell 7',
     kind: 'powershell',
-    compatible: false,
+    dialect: 'powershell',
+    compatible: true,
     source: 'well-known',
   });
   add(path.join(programFiles, 'PowerShell', '7-preview', 'pwsh.exe'), {
     id: 'pwsh-preview',
     label: 'PowerShell 7 Preview',
     kind: 'powershell',
-    compatible: false,
+    dialect: 'powershell',
+    compatible: true,
     source: 'well-known',
   });
   add(path.join(winRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), {
     id: 'powershell',
     label: 'Windows PowerShell 5.1',
     kind: 'powershell',
-    compatible: false,
+    dialect: 'powershell',
+    compatible: true,
     source: 'well-known',
   });
   add(path.join(winRoot, 'System32', 'cmd.exe'), { id: 'cmd', label: 'cmd.exe', kind: 'cmd', compatible: false, source: 'well-known' });
@@ -588,7 +594,20 @@ function pathShells() {
     const base = path.basename(dir);
     for (const exe of ['bash.exe', 'pwsh.exe', 'nu.exe']) {
       const candidate = path.join(dir, exe);
-      if (!fs.existsSync(candidate)) continue;
+      // A Microsoft Store app-execution alias is a reparse point that the FS
+      // API reports as EACCES, so `existsSync` says no while `spawn` works.
+      // For the alias directories, treat a directory entry as present.
+      const aliasDir = /[\\/]windowsapps$/i.test(dir);
+      if (!fs.existsSync(candidate) && !aliasDir) continue;
+      if (aliasDir && !fs.existsSync(candidate)) {
+        let listed = false;
+        try {
+          listed = fs.readdirSync(dir, { withFileTypes: true }).some((item) => item.name.toLowerCase() === exe.toLowerCase());
+        } catch {
+          listed = false;
+        }
+        if (!listed) continue;
+      }
       if (exe === 'bash.exe') {
         const id = /git/i.test(dir)
           ? 'git-bash'
@@ -611,7 +630,18 @@ function pathShells() {
       } else if (exe === 'nu.exe') {
         entries.push({ path: candidate, id: 'nushell', label: 'Nushell', kind: 'nu', compatible: false, source: 'path' });
       } else {
-        entries.push({ path: candidate, id: 'pwsh', label: 'PowerShell 7 (PATH)', kind: 'powershell', compatible: false, source: 'path' });
+        // PowerShell is the second shell dialect this plugin can drive (see
+        // `powershellCommand`), not a bash shell, so it has its own group.
+        const alias = /windowsapps/i.test(dir);
+        entries.push({
+          path: candidate,
+          id: alias ? 'pwsh-store' : 'pwsh',
+          label: alias ? 'PowerShell 7 (Microsoft Store alias)' : `PowerShell 7 (PATH) · ${base}`,
+          kind: 'powershell',
+          dialect: 'powershell',
+          compatible: true,
+          source: 'path',
+        });
       }
     }
   }
@@ -648,8 +678,12 @@ async function discoverShells(refresh = false) {
     try {
       real = fs.realpathSync.native(entry.path);
       if (!fs.statSync(real).isFile()) continue;
-    } catch {
-      continue;
+    } catch (error) {
+      // Store app aliases answer EACCES instead of resolving; keep the path
+      // `spawn` would use rather than dropping a shell the user can run.
+      const alias = /[\\/]windowsapps[\\/][^\\/]+\.exe$/i.test(entry.path);
+      if (!alias || (error?.code !== 'EACCES' && error?.code !== 'EPERM')) continue;
+      real = entry.path;
     }
     // A per-distro WSL entry shares `System32\bash.exe` with every other
     // distro, so the de-duplication key has to include the distro name. The
@@ -661,6 +695,7 @@ async function discoverShells(refresh = false) {
       path: real,
       id: entry.id,
       ...entry.distro === undefined ? {} : { distro: entry.distro },
+      ...entry.dialect === undefined ? {} : { dialect: entry.dialect },
       label: entry.label,
       kind: entry.kind,
       compatible: entry.compatible === true,
@@ -673,7 +708,7 @@ async function discoverShells(refresh = false) {
   // within a tier, raw installs before linked/duplicated ones, then by label.
   // The first compatible entry is what `auto` picks, so this order decides the
   // default — a native bash (Git Bash, Niubash) beats a WSL launcher.
-  const tier = (shell) => (isWslLauncher(shell) ? 2 : 1);
+  const tier = (shell) => (isPowerShell(shell) ? 3 : isWslLauncher(shell) ? 2 : 1);
   // `usr\bin` is the real bash; `bin` is the shim Git for Windows puts first on
   // PATH. Prefer the real one when both resolve, so `auto` picks the same binary.
   const shim = (shell) => (/[\\/]bin[\\/]bash\.exe$/i.test(shell.path) && !/[\\/]usr[\\/]bin[\\/]/i.test(shell.path) ? 1 : 0);
@@ -697,6 +732,15 @@ async function discoverShells(refresh = false) {
   }
   shells.length = 0;
   shells.push(...unique);
+
+  // `WindowsApps\bash.exe` is a Store alias for the same WSL launcher as
+  // `System32\bash.exe`, so the named entry replaces it.
+  const isStoreBashAlias = (shell) => /[\\/]windowsapps[\\/]bash\.exe$/i.test(String(shell.path ?? ''));
+  if (shells.some((shell) => shell.source === 'well-known' && shell.id === 'wsl')) {
+    const filtered = shells.filter((shell) => !isStoreBashAlias(shell));
+    shells.length = 0;
+    shells.push(...filtered);
+  }
   discovery = { at: Date.now(), shells };
   return shells;
 }
@@ -722,6 +766,13 @@ function probeVersion(shell) {
         maxBuffer: 64 * 1024,
       });
       version = /version\s+([0-9][^\s(]*)/i.exec(output)?.[1] ?? (output.split(/\r?\n/)[0] ?? '').trim();
+    } else if (isPowerShell(shell)) {
+      const output = execFileSync(
+        shell.path,
+        ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.ToString()'],
+        { encoding: 'utf8', windowsHide: true, timeout: 4000, maxBuffer: 64 * 1024 },
+      );
+      version = output.trim().split(/\r?\n/).pop() ?? '';
     }
   } catch {
     version = '';
@@ -762,13 +813,16 @@ function withVersions(shells) {
 /** Does this path name one of the detected shells? */
 function findByPath(shells, candidate, distro) {
   if (typeof candidate !== 'string' || candidate.length === 0) return undefined;
+  const sameDistro = (shell) => String(shell.distro ?? '') === String(distro ?? '');
   let real;
   try {
     real = fs.realpathSync.native(candidate);
   } catch {
-    return undefined;
+    // Store app-execution aliases cannot be resolved (EACCES); match them by
+    // their own path, which is what spawn uses.
+    const literal = shells.find((shell) => shell.path.toLowerCase() === candidate.toLowerCase() && sameDistro(shell));
+    return literal;
   }
-  const sameDistro = (shell) => String(shell.distro ?? '') === String(distro ?? '');
   return (
     shells.find((shell) => shell.path.toLowerCase() === real.toLowerCase() && sameDistro(shell)) ?? {
       path: real,
@@ -870,6 +924,58 @@ function wslCommand(shellPath, command, workdir, distro) {
 }
 
 /**
+ * Is this shell a PowerShell dialect rather than bash?
+ * @param {Record<string, unknown>} shell - the resolved shell.
+ * @returns {boolean} whether the command has to be sent as PowerShell source.
+ */
+function isPowerShell(shell) {
+  return shell?.dialect === 'powershell' || shell?.kind === 'powershell';
+}
+
+/**
+ * Bootstrap that reads UTF-8 source from stdin and runs it in a script block.
+ *
+ * The source never appears on the command line: a quoting mistake becomes a
+ * syntax error instead of executing part of the command, and non-ASCII text
+ * survives intact. `-EncodedCommand` is not used because it would need UTF-16.
+ */
+const POWERSHELL_STDIN_BOOTSTRAP =
+  "$__dsh_source = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String([Console]::In.ReadToEnd())); " +
+  "& ([ScriptBlock]::Create($__dsh_source))";
+
+/**
+ * Prologue that makes PowerShell's output and native-command encoding UTF-8.
+ *
+ * Without it, output from a non-ASCII path or a native program is decoded as
+ * the OEM code page and arrives as mojibake. `UTF8Encoding($false)` keeps a BOM
+ * off any stdin a native child would receive.
+ */
+const POWERSHELL_UTF8_PREFACE =
+  "$OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); " +
+  "if ($PSStyle) { $PSStyle.OutputRendering = 'PlainText' }";
+
+/**
+ * Build the argv and stdin for one PowerShell command.
+ *
+ * Mirrors what `@4fu/pi-pwsh` does (see its `spawn.ts`): UTF-8 source over
+ * stdin, a base64 bootstrap, and the `-NoLogo -NoProfile -NonInteractive`
+ * flags that keep a managed shell out of interactive/profile behaviour.
+ * @param {Record<string, unknown>} shell - the resolved PowerShell.
+ * @param {string} command - the PowerShell source.
+ * @param {boolean} [loadProfile] - keep the user's profile active.
+ * @returns {{ argv: string[], stdin?: string }} the invocation.
+ */
+function powershellCommand(shell, command, loadProfile = false) {
+  const flags = ['-NoLogo', loadProfile ? null : '-NoProfile', '-NonInteractive', '-Command', POWERSHELL_STDIN_BOOTSTRAP]
+    .filter((flag) => flag !== null);
+  const source = `${POWERSHELL_UTF8_PREFACE}\n${command}`;
+  return {
+    argv: [shell.path, ...flags],
+    stdin: Buffer.from(source, 'utf8').toString('base64'),
+  };
+}
+
+/**
  * The bash executor: the shipped sandbox-aware executor with one change — every
  * invocation names the resolved shell explicitly instead of `bash` on PATH.
  *
@@ -920,7 +1026,7 @@ async function shellSwitchExecutor() {
         throw new Error('dsh-shell-switch: 没有可用的 bash shell；请在 设置 → Shell 选择器 中选择，或安装 Niubash / Git Bash / MSYS2');
       }
       if (decision.shell.compatible === false) {
-        throw new Error(`dsh-shell-switch: ${decision.shell.label} 不是 bash 方言，无法执行 bash 命令`);
+        throw new Error(`dsh-shell-switch: ${decision.shell.label} 不是可用的 shell（既不是 bash 方言，也不是 PowerShell）`);
       }
       return decision;
     }
@@ -948,10 +1054,20 @@ async function shellSwitchExecutor() {
      * @returns {string[]} argv handed to the sandbox provider or the subprocess.
      */
     argvFor(shell, command, policy, workdir) {
+      if (isPowerShell(shell)) return powershellCommand(shell, command, Boolean(this.config?.loadProfile?.get?.())).argv;
       if (isWslLauncher(shell)) {
         return wslCommand(shell.path, command, workdir ?? policy?.workspaceRoot ?? process.cwd(), shell.distro);
       }
       return [shell.path, '-c', command];
+    }
+
+    /**
+     * The spec fields a PowerShell command needs: the base64 source for stdin.
+     * @param {object} spec - the resolved spec carrying the command.
+     * @returns {{ stdin: string }} the stdin payload.
+     */
+    powershellSpec(spec) {
+      return { stdin: Buffer.from(`${POWERSHELL_UTF8_PREFACE}\n${spec.command}`, 'utf8').toString('base64') };
     }
 
     /**
@@ -962,9 +1078,16 @@ async function shellSwitchExecutor() {
      */
     async execute(spec) {
       const policy = spec.sandboxPolicy;
+      // A PowerShell command travels on stdin (base64 UTF-8 source), so the
+      // executed spec carries that payload; bash and WSL keep the command in
+      // argv and leave stdin alone.
+      const { shell: probe } = await this.current();
+      const runSpec = isPowerShell(probe)
+        ? { ...spec, ...this.powershellSpec(spec) }
+        : spec;
       if (policy?.mode === 'danger-full-access') {
         const { shell } = await this.current();
-        const execution = await this.executeArgv(spec, this.argvFor(shell, spec.command, policy, spec.workdir));
+        const execution = await this.executeArgv(runSpec, this.argvFor(shell, spec.command, policy, spec.workdir));
         return SandboxBashExecutor.decorateResult(execution, (result) => ({
           ...result,
           sandbox: { mode: 'danger-full-access', denied: false },
@@ -977,7 +1100,7 @@ async function shellSwitchExecutor() {
       const { mode } = policy;
       let confined;
       const execution = await this.executeArgv(
-        spec,
+        runSpec,
         async (signal) => {
           const prepared = await this.confine(spec.command, { ...policy, mode }, signal, spec.workdir);
           signal.throwIfAborted();

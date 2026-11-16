@@ -12,6 +12,7 @@ window.__ModuleLoader__.load({
       description: 'Choose which local shell the bash tool runs commands in. The change applies to the next command — no restart needed.',
       shell: 'Shell executable',
       compatible: 'Bash-compatible',
+      powershell: 'PowerShell (commands must be PowerShell syntax)',
       other: 'Detected, not bash-compatible',
       detected: 'Detected shells',
       effective: 'In effect now',
@@ -45,6 +46,7 @@ window.__ModuleLoader__.load({
       description: '选择 bash 工具实际调用的本机 shell。保存后下一条命令即生效，不需要重启。',
       shell: 'Shell 可执行文件',
       compatible: '可用于 bash',
+      powershell: 'PowerShell（命令需为 PowerShell 语法）',
       other: '已检测到，但不是 bash 方言',
       detected: '检测到的 shell',
       effective: '当前生效',
@@ -252,7 +254,9 @@ window.__ModuleLoader__.load({
       }
 
       const shells = Array.isArray(state.shells) ? state.shells : [];
-      const compatible = shells.filter((shell) => shell.compatible === true);
+      const isPs = (shell) => shell.dialect === 'powershell' || shell.kind === 'powershell';
+      const compatible = shells.filter((shell) => shell.compatible === true && !isPs(shell));
+      const powershell = shells.filter((shell) => shell.compatible === true && isPs(shell));
       const others = shells.filter((shell) => shell.compatible !== true);
       const currentValue = optionValue(state.selected ?? {});
       const dirty = draft !== currentValue;
@@ -261,6 +265,9 @@ window.__ModuleLoader__.load({
       if (compatible.length > 0) groups.push(h('optgroup', { key: 'compatible', label: t('compatible') },
         compatible.map((shell) => h('option', { key: shell.path, value: optionValue(shell) },
           `${shell.label}${shell.version ? ` · ${shell.version}` : ''}${shell.note ? ` — ${shell.note}` : ''}`))));
+      if (powershell.length > 0) groups.push(h('optgroup', { key: 'powershell', label: t('powershell') },
+        powershell.map((shell) => h('option', { key: shell.path, value: optionValue(shell) },
+          `${shell.label}${shell.version ? ` · ${shell.version}` : ''}`))));
       if (others.length > 0) groups.push(h('optgroup', { key: 'others', label: t('other') },
         others.map((shell) => h('option', { key: shell.path, value: optionValue(shell), disabled: true },
           `${shell.label}（${t('incompatible')}）`))));
