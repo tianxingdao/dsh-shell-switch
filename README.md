@@ -20,6 +20,7 @@ Windows 下还会隐藏官方 `pwsh` 工具，让 `bash` 成为唯一的 shell �
 - [环境要求](#环境要求)
 - [安装](#安装)
 - [使用](#使用)
+  - [后台任务（持久后台会话）](#后台任务持久后台会话)
 - [工作原理](#工作原理)
 - [配置](#配置)
 - [HTTP 接口](#http-接口)
@@ -46,11 +47,12 @@ Windows 上的 DSH 默认有两条 shell 路径：
 
 ## 功能
 
-- **`bash` 工具**：复用官方 `@deepseek-ai/dsh-tool-bash` 与 `@deepseek-ai/dsh-bash-sandbox`，只把执行文件换成你选的 shell。因此后台任务（`run_in_background`）、超时、输出 spill、沙箱升级、`[exit code: N]` 标记等行为与官方完全一致。
+- **`bash` 工具**：复用官方 `@deepseek-ai/dsh-tool-bash` 与 `@deepseek-ai/dsh-bash-sandbox`，只把执行文件换成你选的 shell。因此超时、输出 spill、沙箱升级、`[exit code: N]` 标记等行为与官方一致。
+- **持久后台会话**：自带 `bg_start` / `bg_output` / `bg_list` / `bg_kill` 四个工具，启动**真正 detach 的常驻进程**（工具调用结束、harness 重启后仍在跑），可增量读日志、按整棵进程树停止。**不依赖** `@deepseek-ai/dsh-tool-jobs`。装了 `dsh-better-sidebar` 时还会注册一个「后台任务」侧栏页（本会话 / 全部、树形分组、流式日志、一键停止）。
 - **设置 → Shell 选择器**：下拉框列出本机所有 shell（含版本、路径），支持保存、恢复默认、重新扫描；保存后**下一条命令即生效**，无需重启。
 - **Windows 下隐藏 `pwsh`**：官方 `pwsh` 工具无法卸载，但只要本插件启用，就对每个 Agent 加作用域级屏蔽，`bash` 成为唯一 shell 工具；停用插件即恢复。
 - **不破坏现有能力**：不改宿主的 `ctx.shell` 执行器，`pwsh` 执行器行原样保留；其他预设工具（文件、搜索、子代理等）不受影响。
-- **尊重沙箱**：命令始终按当前会话的 `ctx.sandboxPolicy` 执行，插件不提供任何绕过。
+- **尊重沙箱**：`bash` 命令始终按当前会话的 `ctx.sandboxPolicy` 执行，插件不提供任何绕过（**例外**：`bg_start` 起的脱离后台进程不受沙箱约束，见下文）。
 
 ## 环境要求
 
@@ -186,6 +188,35 @@ bash: {
 - `pwsh` 的隐藏是 Agent 作用域上的一条 deny 过滤，随插件卸载/停用释放；
 - 未选择时（`auto`）按可用项自动选一个 bash 系列，因此默认隐藏 `pwsh`。
 
+### 后台任务（持久后台会话）
+
+插件自带一套**持久后台会话**，让「用完即走」的工具调用也能跑常驻进程（开发服务器、监听器、守护进程）。它**不依赖** `@deepseek-ai/dsh-tool-jobs`，而是自己起真正 detach 的进程：
+
+| 工具 | 作用 |
+|---|---|
+| `bg_start` | 用当前选中的 shell（bash / WSL / PowerShell 语法各自适配）启动一个**分离进程**，立即返回 `jobId` |
+| `bg_output` | 按 offset 增量读取该任务的日志；`follow:true` 时最多等待 `timeout_ms`，不无限阻塞 |
+| `bg_list` | 列出任务（默认全部，`this_conversation:true` 仅本会话） |
+| `bg_kill` | 结束任务及其**整棵进程树**（Windows `taskkill /T /F`，POSIX 信号进程组） |
+
+关键点：
+
+- **真正的后台常驻**：进程以 `detached` 方式启动并 `unref()`，输出重定向到 `%DSH_HOME%\shell-switch-jobs\<id>.log`。工具调用结束、甚至 harness 重启后，它仍在运行；重启后仍活着的任务标为 `orphan`，仍可 `bg_kill` 清理。
+- **不受沙箱约束**：`bg_start` 启动的是脱离进程，**不受**会话文件沙箱限制（后台常驻与只读沙箱语义冲突）。它已脱离受管的 `ctx.subprocess`，以其用户权限运行——工具描述里也明确标注了这一点。
+- **`run_in_background` 已关闭**：`bash` 工具不再暴露 `run_in_background` 参数，后台工作统一走 `bg_*`，避免两套并存、也避免与官方 jobs 组件冲突。
+- **日志轮转**：每个任务日志上限 `maxLogBytes`（默认 8 MB），超出从头部丢弃；保留任务数上限 `maxJobs`（默认 50），先淘汰最旧的已结束任务。
+
+#### 侧栏面板（依赖 `dsh-better-sidebar`）
+
+若安装了 [`dsh-better-sidebar`](https://github.com/omdsh-dev/DSH-better-sidebar)，插件会向它注册一个「后台任务」页（`ctx.betterSidebar.registerTab`）：
+
+- **本会话 / 全部**两个视图，**默认优先显示当前所开会话**的任务；
+- **树形分组**：按会话（`sessionId`）分组，可折叠，本会话置顶；
+- 点开某任务**流式展开日志**（1.5s 增量拉取），运行中可一键**停止**；
+- 未安装 `dsh-better-sidebar` 时该页静默不注册，其余功能不受影响。
+
+> 提示：`bg_*` 工具与侧栏页都来自 Host 侧，**改动本插件后需重启 DSH（重新加载该 bundle）生效**；客户端 `client.js` 由 `/plugins/<id>/client.js` 按需从磁盘读取，改后刷新页面即可。
+
 ## 工作原理
 
 ```text
@@ -210,14 +241,16 @@ Agent 创建
 
 ```text
 .
-├─ index.js            Host 半：shell 检测、执行器、按 Agent 挂载、pwsh 屏蔽、设置 API
-├─ client.js           Client 半：设置 → Shell 选择器（slot settings.section）
-├─ cordis.patch.yml    bundle 补丁，只插入一行 shell-switch
-├─ locale/             插件清单里的标题与描述（zh / en）
-├─ icon.svg            插件图标
-├─ package.json        bundle 清单（dsh.bundle.patch + dsh.client）
-├─ README.md           中文说明
-└─ README.en.md        英文说明
+├─ index.js              Host 半：shell 检测、执行器、按 Agent 挂载、pwsh 屏蔽、设置/任务 API
+├─ background.js         持久后台会话管理器（detached 进程、日志落盘、索引、orphan 扫描）
+├─ background-tools.js   bg_start / bg_output / bg_list / bg_kill 工具定义
+├─ client.js             Client 半：设置 → Shell 选择器 + better-sidebar「后台任务」页
+├─ cordis.patch.yml      bundle 补丁，只插入一行 shell-switch
+├─ locale/               插件清单里的标题与描述（zh / en）
+├─ icon.svg              插件图标
+├─ package.json          bundle 清单（dsh.bundle.patch + dsh.client）
+├─ README.md             中文说明
+└─ README.en.md          英文说明
 ```
 
 ## 配置
@@ -241,6 +274,9 @@ profile patch 中的 `shell-switch` 行：
 | `maxSpillBytes` | `67108864` | spill 文件上限 |
 | `graceMs` | `3000` | 终止到强杀的宽限期 |
 | `loadProfile` | `false` | 选择 PowerShell 时是否加载用户的 `$PROFILE` |
+| `background.enabled` | `true` | 是否启用持久后台会话（`bg_*` 工具与侧栏页） |
+| `background.maxLogBytes` | `8388608` | 单个后台任务日志上限（超出从头丢弃） |
+| `background.maxJobs` | `50` | 保留的后台任务条数（先淘汰最旧的已结束任务） |
 
 选择优先级：设置页保存的路径 → `shellPath` → `shell` → 自动检测。
 
@@ -263,6 +299,10 @@ Host 内部接口，仅同源页面可访问（供设置页使用；通过局域
 |---|---|---|
 | `GET` | `/api/dsh-shell-switch/state` | 检测列表、当前选择、生效项、沙箱模式、pwsh 状态 |
 | `POST` | `/api/dsh-shell-switch/select` | `{ "path": "…" }` 选择；`{ "action": "reset" }` 恢复默认 |
+| `GET` | `/api/dsh-shell-switch/jobs?session=<id>` | 本会话 + 其它会话分组的后台任务 |
+| `GET` | `/api/dsh-shell-switch/jobs?all=1` | 全部后台任务（扁平列表） |
+| `GET` | `/api/dsh-shell-switch/jobs/<id>/log?offset=N&limit=M` | 从字节 offset 增量读取某任务日志 |
+| `POST` | `/api/dsh-shell-switch/jobs/<id>/kill` | `{ "reason": "…" }` 结束任务及其进程树（需 JSON 内容类型） |
 
 `/state` 示例（截断）：
 
@@ -310,6 +350,8 @@ Host 内部接口，仅同源页面可访问（供设置页使用；通过局域
 - 受限模式通过 `ctx.sandbox.confine(argv, policy)`（Windows 上为 ACL 受限令牌链）包装后才启动进程；
 - 文件被拒绝时会在 stderr 出现拒绝信息，并带上沙箱模式说明；
 - 插件本身不改变权限、不提供绕过，也不缓存特权结果。
+
+**`bg_start` 的例外**：`bg_start` 启动的是**脱离进程**（detached + `unref()`），它不属于受管的 `ctx.subprocess`，因此**不受**会话沙箱约束，以当前用户权限运行。这是有意为之——后台常驻进程（开发服务器、守护进程）与只读沙箱的语义本就冲突；工具描述中也明确标注了这一点。`bash` 工具的前台命令则始终受沙箱约束。
 
 ## 已知限制
 

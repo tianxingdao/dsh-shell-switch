@@ -41,7 +41,9 @@
     "client.js",
     "cordis.patch.yml",
     "locale/*.json",
-    "icon.svg"
+    "icon.svg",
+    "background.js",
+    "background-tools.js"
   ],
   "dsh": {
     "bundle": {

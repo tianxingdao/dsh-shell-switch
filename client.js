@@ -37,6 +37,30 @@ window.__ModuleLoader__.load({
       settingsFile: 'Saved in',
       pwshHiddenNote: 'While this plugin is active, on Windows the shipped pwsh tool is hidden from every Agent; disable or remove the plugin to bring it back.',
       note: 'Note',
+      // Background jobs tab (better-sidebar).
+      bgNav: 'Background jobs',
+      bgDescription: 'Detached background processes started with bg_start — they keep running after the tool call and the harness restart.',
+      bgThis: 'This conversation',
+      bgAll: 'All',
+      bgRefresh: 'Refresh',
+      bgRunning: 'running',
+      bgExited: 'exited',
+      bgKilled: 'killed',
+      bgFailed: 'failed',
+      bgOrphan: 'detached',
+      bgStopping: 'stopping',
+      bgEmpty: 'No background jobs yet.',
+      bgEmptySession: 'No background jobs in this conversation.',
+      bgKill: 'Stop',
+      bgKilling: 'Stopping…',
+      bgOpenLog: 'Log',
+      bgCloseLog: 'Hide log',
+      bgLoadingLog: 'Loading…',
+      bgOtherSessions: 'Other conversations',
+      bgNoOwner: 'No owner',
+      bgLoadFailed: 'Could not read the job list',
+      bgKillFailed: 'Stop request failed',
+      bgStarted: 'started',
     };
 
     /** Simplified Chinese copy for the Shell selector page. */
@@ -71,6 +95,30 @@ window.__ModuleLoader__.load({
       settingsFile: '保存位置',
       pwshHiddenNote: '本插件启用期间，如果是 Windows 环境，官方 pwsh 工具对所有 Agent 隐藏；停用或卸载本插件即可恢复。',
       note: '说明',
+      // 后台任务 tab（better-sidebar）。
+      bgNav: '后台任务',
+      bgDescription: '由 bg_start 启动的分离后台进程，工具调用结束后仍继续运行（重启 harness 也不受影响）。',
+      bgThis: '本会话',
+      bgAll: '全部',
+      bgRefresh: '刷新',
+      bgRunning: '运行中',
+      bgExited: '已结束',
+      bgKilled: '已停止',
+      bgFailed: '失败',
+      bgOrphan: '已脱管',
+      bgStopping: '停止中',
+      bgEmpty: '暂无后台任务。',
+      bgEmptySession: '本会话暂无后台任务。',
+      bgKill: '停止',
+      bgKilling: '停止中…',
+      bgOpenLog: '日志',
+      bgCloseLog: '收起日志',
+      bgLoadingLog: '加载中…',
+      bgOtherSessions: '其它会话',
+      bgNoOwner: '无归属',
+      bgLoadFailed: '读取任务列表失败',
+      bgKillFailed: '停止请求失败',
+      bgStarted: '启动于',
     };
 
     /**
@@ -309,6 +357,236 @@ window.__ModuleLoader__.load({
         h('p', { style: styles.hint }, `${t('settingsFile')}：${state.settingsFile}`));
     }
 
+    // --- Background jobs panel (rendered inside dsh-better-sidebar) --------
+
+    /** Extra styles for the jobs panel. */
+    const jobStyles = {
+      root: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, fontSize: '12px', color: 'var(--dsw-alias-label-primary)' },
+      toolbar: { display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 10px', borderBottom: '1px solid var(--dsw-alias-border-l1)', flexWrap: 'wrap' },
+      seg: { display: 'inline-flex', border: '1px solid var(--dsw-alias-border-l1)', borderRadius: '7px', overflow: 'hidden' },
+      segBtn: (active) => ({ padding: '3px 10px', fontSize: '12px', cursor: 'pointer', border: 'none', background: active ? 'var(--dsw-alias-brand-primary)' : 'transparent', color: active ? '#fff' : 'var(--dsw-alias-label-secondary)' }),
+      spacer: { flex: '1 1 auto' },
+      minibtn: { padding: '3px 9px', fontSize: '12px', cursor: 'pointer', borderRadius: '7px', border: '1px solid var(--dsw-alias-border-l1)', background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)' },
+      scroller: { flex: '1 1 auto', overflow: 'auto', minHeight: 0 },
+      groupHead: { display: 'flex', alignItems: 'center', gap: '6px', padding: '7px 10px 4px', fontSize: '11px', color: 'var(--dsw-alias-label-secondary)', cursor: 'pointer', userSelect: 'none' },
+      groupCount: { opacity: 0.7 },
+      row: { display: 'flex', alignItems: 'center', gap: '7px', padding: '6px 10px', borderTop: '1px solid var(--dsw-alias-border-l1)' },
+      dot: (status) => ({ width: '8px', height: '8px', borderRadius: '50%', flex: '0 0 auto', background: status === 'running' ? 'var(--dsw-alias-state-success-primary)' : status === 'failed' ? 'var(--dsw-alias-state-error-primary)' : status === 'orphan' ? '#e0a800' : 'var(--dsw-alias-label-secondary)' }),
+      label: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+      statusText: { fontSize: '11px', color: 'var(--dsw-alias-label-secondary)', flex: '0 0 auto' },
+      log: { margin: 0, padding: '8px 10px', background: 'var(--dsw-alias-bg-layer-2)', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: '11px', lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: '240px', overflow: 'auto', borderTop: '1px solid var(--dsw-alias-border-l1)' },
+      meta: { padding: '2px 10px 8px', fontSize: '11px', color: 'var(--dsw-alias-label-secondary)', wordBreak: 'break-all' },
+      empty: { padding: '18px 12px', textAlign: 'center', color: 'var(--dsw-alias-label-secondary)' },
+      err: { padding: '8px 10px', color: 'var(--dsw-alias-state-error-primary)' },
+    };
+
+    /** Human-friendly elapsed "3m 12s". */
+    function elapsed(from, to) {
+      const ms = Math.max(0, (to ?? Date.now()) - (from ?? to ?? Date.now()));
+      const s = Math.floor(ms / 1000);
+      if (s < 60) return `${s}s`;
+      const m = Math.floor(s / 60);
+      if (m < 60) return `${m}m ${s % 60}s`;
+      const hrs = Math.floor(m / 60);
+      return `${hrs}h ${m % 60}m`;
+    }
+
+    /** Short id for a session (first 8 chars). */
+    function shortSession(id) {
+      if (typeof id !== 'string' || id.length === 0) return '';
+      return id.length > 8 ? id.slice(0, 8) : id;
+    }
+
+    /**
+     * The Background-jobs page. Two views (this conversation / all), a per-
+     * session tree, a streaming log per job, and a per-row stop button.
+     *
+     * Polls the host `/jobs` surface while visible and there is anything
+     * running; a manual refresh is always available.
+     */
+    function JobsPanel(props) {
+      const t = typeof props.t === 'function' ? props.t : (key) => key;
+      const scope = props.scope ?? {};
+      const visible = props.visible !== false;
+      const sessionId = String(scope.sessionId ?? '');
+      const [view, setView] = React.useState('session'); // 'session' | 'all'
+      const [data, setData] = React.useState(null); // { active, groups, total } or { jobs }
+      const [error, setError] = React.useState(null);
+      const [expanded, setExpanded] = React.useState(() => new Set());
+      const [openLog, setOpenLog] = React.useState(null); // jobId
+      const [logText, setLogText] = React.useState({});
+      const [logOffset, setLogOffset] = React.useState({});
+      const [busy, setBusy] = React.useState({});
+      const collapsed = React.useRef(new Set());
+
+      const load = React.useCallback(async () => {
+        try {
+          const query = view === 'all' ? '/jobs?all=1' : `/jobs?session=${encodeURIComponent(sessionId)}`;
+          const next = await request(query);
+          setData(next);
+          setError(null);
+        } catch (failure) {
+          setError(`${t('bgLoadFailed')}：${failure.message}`);
+        }
+      }, [view, sessionId, t]);
+
+      // Initial + view-change load.
+      React.useEffect(() => { void load(); }, [load]);
+
+      // Poll while visible and something is alive.
+      React.useEffect(() => {
+        if (!visible) return undefined;
+        const anyLive = () => {
+          if (data === null) return true;
+          const all = data.jobs ?? [...(data.active ?? []), ...((data.groups ?? []).flatMap((g) => g.jobs))];
+          return all.some((job) => job.status === 'running' || job.status === 'stopping' || job.status === 'orphan');
+        };
+        if (!anyLive()) return undefined;
+        const timer = setInterval(() => { void load(); }, 4000);
+        return () => clearInterval(timer);
+      }, [visible, data, load]);
+
+      // Poll the open job's log.
+      React.useEffect(() => {
+        if (openLog === null || !visible) return undefined;
+        let cancelled = false;
+        const tick = async () => {
+          try {
+            const offset = logOffset[openLog] ?? 0;
+            const read = await request(`/jobs/${encodeURIComponent(openLog)}/log?offset=${offset}`);
+            if (cancelled) return;
+            if (typeof read.text === 'string' && read.text.length > 0) {
+              setLogText((prev) => ({ ...prev, [openLog]: (prev[openLog] ?? '') + read.text }));
+            }
+            setLogOffset((prev) => ({ ...prev, [openLog]: typeof read.offset === 'number' ? read.offset : offset }));
+          } catch {
+            // A missing log file (just started) is not an error worth surfacing.
+          }
+        };
+        void tick();
+        const timer = setInterval(() => { void tick(); }, 1500);
+        return () => { cancelled = true; clearInterval(timer); };
+      }, [openLog, visible, logOffset]);
+
+      const kill = async (jobId) => {
+        setBusy((prev) => ({ ...prev, [jobId]: true }));
+        try {
+          await request(`/jobs/${encodeURIComponent(jobId)}/kill`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ reason: 'stopped from sidebar' }),
+          });
+          await load();
+        } catch (failure) {
+          setError(`${t('bgKillFailed')}：${failure.message}`);
+        } finally {
+          setBusy((prev) => ({ ...prev, [jobId]: false }));
+        }
+      };
+
+      const toggleGroup = (key) => {
+        const set = collapsed.current;
+        if (set.has(key)) set.delete(key); else set.add(key);
+        setExpanded(new Set(set));
+      };
+
+      const toggleLog = (jobId) => {
+        setOpenLog((prev) => (prev === jobId ? null : jobId));
+      };
+
+      const statusLabel = (status) => {
+        switch (status) {
+          case 'running': return t('bgRunning');
+          case 'stopping': return t('bgStopping');
+          case 'killed': return t('bgKilled');
+          case 'failed': return t('bgFailed');
+          case 'orphan': return t('bgOrphan');
+          default: return t('bgExited');
+        }
+      };
+
+      const renderJob = (job) => {
+        const isOpen = openLog === job.id;
+        const live = job.status === 'running' || job.status === 'stopping' || job.status === 'orphan';
+        return h('div', { key: job.id },
+          h('div', { style: jobStyles.row },
+            h('span', { style: jobStyles.dot(job.status), title: statusLabel(job.status) }),
+            h('span', { style: jobStyles.label, title: job.command ?? job.label }, job.label),
+            h('span', { style: jobStyles.statusText }, `${statusLabel(job.status)} · ${elapsed(job.startedAt, job.endedAt)}`),
+            h('button', { type: 'button', style: jobStyles.minibtn, onClick: () => toggleLog(job.id) }, isOpen ? t('bgCloseLog') : t('bgOpenLog')),
+            live
+              ? h('button', { type: 'button', style: jobStyles.minibtn, disabled: busy[job.id] === true, onClick: () => kill(job.id) }, busy[job.id] ? t('bgKilling') : t('bgKill'))
+              : null),
+          isOpen
+            ? h('div', null,
+              h('pre', { style: jobStyles.log }, (logText[job.id] ?? '') || t('bgLoadingLog')),
+              h('div', { style: jobStyles.meta }, `${job.shellLabel ? `${job.shellLabel} · ` : ''}${job.cwd}`))
+            : null);
+      };
+
+      const renderGroup = (key, title, jobs, collapsible) => {
+        if (!Array.isArray(jobs) || jobs.length === 0) return null;
+        const isCollapsed = collapsible === true && collapsed.current.has(key);
+        return h('div', { key },
+          collapsible === true
+            ? h('div', { style: jobStyles.groupHead, onClick: () => toggleGroup(key) },
+              h('span', null, isCollapsed ? '▸' : '▾'),
+              h('span', null, title),
+              h('span', { style: jobStyles.groupCount }, ` (${jobs.length})`))
+            : h('div', { style: jobStyles.groupHead }, h('span', null, title), h('span', { style: jobStyles.groupCount }, ` (${jobs.length})`)),
+          isCollapsed ? null : jobs.map(renderJob));
+      };
+
+      const total = data === null ? 0 : (data.jobs ? data.jobs.length : (data.total ?? 0));
+      const body = [];
+      if (data !== null) {
+        if (view === 'all' && Array.isArray(data.jobs)) {
+          // Group all jobs by owner session, this conversation first.
+          const byOwner = new Map();
+          for (const job of data.jobs) {
+            const key = job.sessionId || '';
+            if (!byOwner.has(key)) byOwner.set(key, []);
+            byOwner.get(key).push(job);
+          }
+          const mine = byOwner.get(sessionId) ?? [];
+          byOwner.delete(sessionId);
+          if (mine.length > 0) body.push(renderGroup('this', t('bgThis'), mine, false));
+          let index = 0;
+          for (const [owner, jobs] of byOwner) {
+            index += 1;
+            const title = owner ? `${t('bgOtherSessions')} · ${shortSession(owner)}` : t('bgNoOwner');
+            body.push(renderGroup(`g${index}`, title, jobs, true));
+          }
+          if (total === 0) body.push(h('div', { key: 'empty', style: jobStyles.empty }, t('bgEmpty')));
+        } else if (view === 'session') {
+          const active = Array.isArray(data.active) ? data.active : [];
+          const groups = Array.isArray(data.groups) ? data.groups : [];
+          if (active.length === 0 && groups.every((g) => (g.jobs ?? []).length === 0)) {
+            body.push(h('div', { key: 'empty', style: jobStyles.empty }, t('bgEmptySession')));
+          } else {
+            if (active.length > 0) body.push(renderGroup('this', t('bgThis'), active, false));
+            let index = 0;
+            for (const group of groups) {
+              index += 1;
+              const title = group.sessionId ? `${t('bgOtherSessions')} · ${shortSession(group.sessionId)}` : t('bgNoOwner');
+              body.push(renderGroup(`g${index}`, title, group.jobs, true));
+            }
+          }
+        }
+      }
+
+      return h('div', { style: jobStyles.root },
+        h('div', { style: jobStyles.toolbar },
+          h('div', { style: jobStyles.seg },
+            h('button', { type: 'button', style: jobStyles.segBtn(view === 'session'), onClick: () => setView('session') }, t('bgThis')),
+            h('button', { type: 'button', style: jobStyles.segBtn(view === 'all'), onClick: () => setView('all') }, t('bgAll'))),
+          h('span', { style: jobStyles.spacer }),
+          h('span', { style: jobStyles.statusText }, `${total}`),
+          h('button', { type: 'button', style: jobStyles.minibtn, onClick: () => load() }, t('bgRefresh'))),
+        error !== null ? h('div', { style: jobStyles.err }, error) : null,
+        h('div', { style: jobStyles.scroller }, body));
+    }
+
     return {
       inject: ['slots', 'locale'],
       apply(ctx) {
@@ -322,6 +600,25 @@ window.__ModuleLoader__.load({
           locale: NS,
           inject: () => ({ t }),
         }, ShellSection));
+        // Register the background-jobs page into dsh-better-sidebar when that
+        // plugin is present. It is optional, so the service is looked up (not
+        // declared in `inject`) and skipped silently when missing.
+        ctx.effect(() => {
+          const service = typeof ctx.get === 'function' ? ctx.get('betterSidebar') : undefined;
+          if (service === undefined || typeof service.registerTab !== 'function') return () => {};
+          const dispose = service.registerTab({
+            id: 'dsh-shell-switch:jobs',
+            title: () => t('bgNav'),
+            description: () => t('bgDescription'),
+            icon: () => h('span', { style: { fontSize: '15px' } }, '▤'),
+            order: 62,
+            single: true,
+            component: (props) => h(JobsPanel, { ...props, t }),
+          });
+          return () => {
+            if (typeof dispose === 'function') dispose();
+          };
+        }, 'dsh-shell-switch: better-sidebar jobs tab');
       },
     };
   },

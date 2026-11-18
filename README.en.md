@@ -22,6 +22,7 @@ After:  "ls" runs in Niubash bash 5.3 directly, with the same output, exit codes
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Usage](#usage)
+  - [Background jobs (persistent sessions)](#background-jobs-persistent-sessions)
 - [How it works](#how-it-works)
 - [Configuration](#configuration)
 - [HTTP API](#http-api)
@@ -48,11 +49,12 @@ This plugin fills that gap: **detect every local shell → choose one in Setting
 
 ## Features
 
-- **A `bash` tool built on the shipped packages**: it reuses `@deepseek-ai/dsh-tool-bash` and `@deepseek-ai/dsh-bash-sandbox` and only swaps the executable. Background jobs (`run_in_background`), timeouts, output spill files, sandbox escalation and the `[exit code: N]` marker all behave exactly like the official tool.
+- **A `bash` tool built on the shipped packages**: it reuses `@deepseek-ai/dsh-tool-bash` and `@deepseek-ai/dsh-bash-sandbox` and only swaps the executable. Timeouts, output spill files, sandbox escalation and the `[exit code: N]` marker all behave exactly like the official tool.
+- **Persistent background sessions**: four self-contained tools — `bg_start` / `bg_output` / `bg_list` / `bg_kill` — that spawn **real detached processes** (they outlive the tool call and a harness restart), stream their log incrementally, and stop the whole process tree. **No dependency on `@deepseek-ai/dsh-tool-jobs`**. When `dsh-better-sidebar` is installed, a "Background jobs" sidebar tab is registered too (This conversation / All, tree grouped by conversation, streaming log, one-click stop).
 - **Settings → Shell selector**: a dropdown listing every detected shell with version and path, plus Save, Reset and Rescan. The change applies to the **next command** — no restart.
 - **`pwsh` hidden on Windows**: the shipped `pwsh` tool cannot be uninstalled, so while this plugin is active a scope-level deny filter removes it from every Agent, making `bash` the only shell tool. Disabling the plugin restores it.
 - **Nothing else disturbed**: the host's `ctx.shell` executor is untouched and the `pwsh-sandbox` row stays composed; other preset tools (files, search, subagents, …) are unaffected.
-- **Sandbox respected**: commands always run under the session's `ctx.sandboxPolicy`; the plugin provides no bypass.
+- **Sandbox respected**: `bash` commands always run under the session's `ctx.sandboxPolicy`; the plugin provides no bypass (**exception**: detached `bg_start` processes are not sandbox-confined, see below).
 
 ## Requirements
 
@@ -146,7 +148,30 @@ bash: {
 - Every call is a fresh shell; `cd`, variables and functions do not persist across calls;
 - The result ends with a machine-readable marker: `[exit code: N]`, `[killed by signal]` or `[timeout after N ms]`;
 - Oversized output is truncated with a note; the full stream lives in a spill file;
-- Like the official bash tool, it supports `run_in_background` (paired with `job_output` / `job_kill`).
+- `run_in_background` is **disabled**: background work is provided by the plugin's own `bg_*` tools (below), not the DSH job registry.
+
+### Background jobs (persistent sessions)
+
+The plugin ships its own **persistent background sessions**, so a "fire-and-forget" tool call can still run long-lived processes (dev servers, watchers, daemons). It does **not** depend on `@deepseek-ai/dsh-tool-jobs`; instead it spawns genuinely detached processes:
+
+| Tool | Purpose |
+|---|---|
+| `bg_start` | Start a **detached** process under the currently selected shell (bash / WSL / PowerShell syntax adapted), returning a `jobId` immediately |
+| `bg_output` | Read the job's log incrementally by offset; `follow:true` waits up to `timeout_ms` (never blocks forever) |
+| `bg_list` | List jobs (all by default; `this_conversation:true` for this conversation only) |
+| `bg_kill` | Terminate a job and its **whole process tree** (Windows `taskkill /T /F`, POSIX process-group signals) |
+
+Key points:
+
+- **Truly persistent**: the process is `spawn(..., { detached: true })` + `unref()`, output redirected to `%DSH_HOME%\shell-switch-jobs\<id>.log`. It keeps running after the tool call and even after a harness restart; a job still alive across a restart is marked `orphan` and can still be killed.
+- **Not sandbox-confined**: `bg_start` runs outside the managed `ctx.subprocess`, so it is **not** confined by the session sandbox — background daemons and read-only confinement contradict each other. The tool description states this explicitly.
+- **Log rotation**: per-job log cap `maxLogBytes` (default 8 MB, dropped from the head); retained-job cap `maxJobs` (default 50, oldest settled first).
+
+#### Sidebar panel (`dsh-better-sidebar`)
+
+With [`dsh-better-sidebar`](https://github.com/omdsh-dev/DSH-better-sidebar) installed, the plugin registers a "Background jobs" tab via `ctx.betterSidebar.registerTab`: **This conversation / All** views (default prioritizes the open conversation), a **tree grouped by conversation**, a streaming log per job, and one-click stop. Without that plugin the tab is simply not registered.
+
+> Note: `bg_*` tools and the sidebar tab come from the Host half, so **restarting DSH (reloading this bundle) is required after changing the plugin**; `client.js` is read from disk on demand at `/plugins/<id>/client.js`, so a page refresh picks up client changes.
 
 ### Settings → Shell selector
 
@@ -212,9 +237,11 @@ Key decisions:
 
 ```text
 .
-├─ index.js            Host half: shell detection, executor, per-Agent mount, pwsh filter, settings API
-├─ client.js           Client half: Settings → Shell selector (slot settings.section)
-├─ cordis.patch.yml    Bundle patch: inserts the single `shell-switch` row
+├─ index.js             Host half: shell detection, executor, per-Agent mount, pwsh filter, settings/jobs API
+├─ background.js        Persistent background-session manager (detached procs, log files, index, orphan sweep)
+├─ background-tools.js  bg_start / bg_output / bg_list / bg_kill tool definitions
+├─ client.js            Client half: Settings → Shell selector + better-sidebar "Background jobs" tab
+├─ cordis.patch.yml     Bundle patch: inserts the single `shell-switch` row
 ├─ locale/             Inventory title and description (zh / en)
 ├─ icon.svg            Plugin icon
 ├─ package.json        Bundle manifest (dsh.bundle.patch + dsh.client)
@@ -243,6 +270,9 @@ The `shell-switch` row in the profile patch:
 | `maxSpillBytes` | `67108864` | Spill-file cap |
 | `graceMs` | `3000` | Grace period between termination and a forced kill |
 | `loadProfile` | `false` | Load the user's `$PROFILE` for the plugin's own PowerShell executor (the official `pwsh` tool follows its own convention) |
+| `background.enabled` | `true` | Enable persistent background sessions (the `bg_*` tools and the sidebar tab) |
+| `background.maxLogBytes` | `8388608` | Per-job log cap (dropped from the head when exceeded) |
+| `background.maxJobs` | `50` | Retained job count (oldest settled jobs pruned first) |
 
 Resolution order: the Settings choice → `shellPath` → `shell` → auto-detection.
 
@@ -265,6 +295,10 @@ Host-internal endpoints, reachable only from the same origin (used by the Settin
 |---|---|---|
 | `GET` | `/api/dsh-shell-switch/state` | Detected shells, current choice, effective shell, sandbox mode, pwsh status |
 | `POST` | `/api/dsh-shell-switch/select` | `{ "path": "…" }` to select; `{ "action": "reset" }` to reset |
+| `GET` | `/api/dsh-shell-switch/jobs?session=<id>` | Background jobs grouped: this conversation + others |
+| `GET` | `/api/dsh-shell-switch/jobs?all=1` | All background jobs (flat list) |
+| `GET` | `/api/dsh-shell-switch/jobs/<id>/log?offset=N&limit=M` | Incremental log read from byte offset |
+| `POST` | `/api/dsh-shell-switch/jobs/<id>/kill` | `{ "reason": "…" }` stop the job and its tree (JSON content type) |
 
 Abridged `/state` example:
 
@@ -312,6 +346,8 @@ Compatibility notes:
 - In confined modes the process is wrapped by `ctx.sandbox.confine(argv, policy)` (an ACL restricted-token chain on Windows) before it starts;
 - A denied file operation shows up in stderr together with the sandbox mode;
 - The plugin never changes permissions, never offers a bypass, and never caches privileged results.
+
+**The `bg_start` exception**: `bg_start` launches a **detached** process (`detached` + `unref()`) that lives outside the managed `ctx.subprocess`, so it is **not** confined by the session sandbox and runs with the current user's privileges. This is intentional — a long-lived background daemon and read-only confinement are mutually exclusive; the tool description states it explicitly. The `bash` tool's foreground commands remain sandbox-confined.
 
 ## Known limitations
 

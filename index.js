@@ -26,6 +26,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+import { BackgroundSessions, DEFAULT_MAX_JOBS, DEFAULT_MAX_LOG_BYTES } from './background.js';
+import { buildBackgroundTools } from './background-tools.js';
+
 const API = '/api/dsh-shell-switch';
 const SETTINGS_FILE = 'shell-switch.json';
 const DEFAULT_SHELL = 'auto';
@@ -108,6 +111,35 @@ function schemastery() {
 
 const z = await schemastery();
 
+/** The background-session manager, created once per row apply and shared. */
+let backgroundSessions = null;
+/** Lazily-loaded DSH tool-definition helpers for the `bg_*` tools. */
+let toolKitPromise;
+function toolKit() {
+  toolKitPromise ??= loadShipped('@deepseek-ai/dsh-tools').then((module) => ({
+    defineTool: module.defineTool,
+    ToolArgsError: module.ToolArgsError,
+  }));
+  return toolKitPromise;
+}
+
+/**
+ * Read the `background` sub-config, unwrapping the volatile cell around it and
+ * the cells around each field, so plain values come back regardless of whether
+ * the row config delivered a raw object or a schemastery cell.
+ * @param {Record<string, unknown>} config - the row config.
+ * @returns {{ enabled: boolean, maxLogBytes: number, maxJobs: number }} resolved values.
+ */
+function backgroundConfig(config) {
+  const raw = valueOf(config?.background, undefined);
+  const inner = raw !== null && typeof raw === 'object' ? raw : {};
+  return {
+    enabled: valueOf(inner.enabled, true) !== false,
+    maxLogBytes: Number(valueOf(inner.maxLogBytes, DEFAULT_MAX_LOG_BYTES)),
+    maxJobs: Number(valueOf(inner.maxJobs, DEFAULT_MAX_JOBS)),
+  };
+}
+
 /** Plugin config: the bash executor's budgets plus the shell choice. */
 export const Config = z.object({
   shell: z.string().default(DEFAULT_SHELL).volatile(),
@@ -120,6 +152,18 @@ export const Config = z.object({
   graceMs: z.number().default(3000).volatile(),
   /** Load the user's PowerShell profile for PowerShell commands (default: no). */
   loadProfile: z.boolean().default(false).volatile(),
+  /**
+   * Persistent background sessions (a self-contained alternative to
+   * `@deepseek-ai/dsh-tool-jobs`): `bg_start`/`bg_output`/`bg_list`/`bg_kill`
+   * tools that run real detached processes surviving the call and a restart.
+   */
+  background: z.object({
+    enabled: z.boolean().default(true).volatile(),
+    /** Per-job log cap in bytes; older output is dropped on rotation. */
+    maxLogBytes: z.number().default(DEFAULT_MAX_LOG_BYTES).volatile(),
+    /** How many settled jobs to retain; oldest pruned first. */
+    maxJobs: z.number().default(DEFAULT_MAX_JOBS).volatile(),
+  }).default({}).volatile(),
 });
 
 /** Append one line to a debug log; diagnostics must never break activation. */
@@ -999,6 +1043,45 @@ function powershellCommand(shell, command, loadProfile = false) {
 }
 
 /**
+ * Resolve the selected shell to a detached-safe argv for one command.
+ *
+ * The foreground executor sends a PowerShell command over stdin; a detached
+ * process has no stdin pipe here, so the base64 UTF-8 source is folded into the
+ * `-Command` argument itself via the same bootstrap. Bash and WSL already carry
+ * the command in argv. This is the background counterpart of the executor's
+ * `argvFor`, kept standalone so `bg_start` needs no live executor.
+ * @param {Record<string, unknown>} config - the row config.
+ * @param {string} command - the command source.
+ * @param {string} workdir - the resolved working directory.
+ * @returns {Promise<{argv: string[], cwd: string, shellLabel: string}>} the detached invocation.
+ */
+async function resolveShellArgv(config, command, workdir) {
+  const decision = resolveShell(config, await discoverShells());
+  const shell = decision.shell;
+  if (shell === undefined) {
+    throw new Error('没有可用的 shell；请在 设置 → Shell 选择器 中选择，或安装 Niubash / Git Bash / MSYS2');
+  }
+  if (shell.compatible === false) {
+    throw new Error(`${shell.label} 不是可用的 shell（既不是 bash 方言，也不是 PowerShell）`);
+  }
+  const cwd = workdir ?? process.cwd();
+  if (isPowerShell(shell)) {
+    const source = `${POWERSHELL_UTF8_PREFACE}\n${command}`;
+    const encoded = Buffer.from(source, 'utf8').toString('base64');
+    const bootstrap = `$__dsh_src = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${encoded}')); & ([ScriptBlock]::Create($__dsh_src))`;
+    const loadProfile = Boolean(valueOf(config?.loadProfile, false));
+    const flags = ['-NoLogo', loadProfile ? null : '-NoProfile', '-NonInteractive', '-Command', bootstrap].filter(
+      (flag) => flag !== null,
+    );
+    return { argv: [shell.path, ...flags], cwd, shellLabel: shell.label };
+  }
+  if (isWslLauncher(shell)) {
+    return { argv: wslCommand(shell.path, command, cwd, shell.distro), cwd, shellLabel: shell.label };
+  }
+  return { argv: [shell.path, '-c', command], cwd, shellLabel: shell.label };
+}
+
+/**
  * The bash executor: the shipped sandbox-aware executor with one change — every
  * invocation names the resolved shell explicitly instead of `bash` on PATH.
  *
@@ -1314,6 +1397,39 @@ function registerRoutes(ctx, config) {
           refilterTools();
           return json(res, 200, await statePayload(ctx, config, false));
         }
+        // --- Background sessions API (used by the sidebar panel) ---
+        if (backgroundSessions === null) {
+          return json(res, 404, { ok: false, error: 'background sessions are disabled' });
+        }
+        if (req.method === 'GET' && tail === '/jobs') {
+          const active = url.searchParams.get('session') ?? '';
+          const all = url.searchParams.get('all') === '1';
+          if (all) return json(res, 200, { ok: true, jobs: backgroundSessions.list() });
+          return json(res, 200, { ok: true, ...backgroundSessions.grouped(active) });
+        }
+        const logMatch = /^\/jobs\/([^/]+)\/log$/.exec(tail);
+        if (req.method === 'GET' && logMatch !== null) {
+          const offset = Number.parseInt(url.searchParams.get('offset') ?? '0', 10) || 0;
+          const limit = Number.parseInt(url.searchParams.get('limit') ?? '', 10) || undefined;
+          const result = backgroundSessions.read(decodeURIComponent(logMatch[1]), offset, limit);
+          if (!result.ok) return json(res, 404, result);
+          return json(res, 200, { ok: true, ...result });
+        }
+        const killMatch = /^\/jobs\/([^/]+)\/kill$/.exec(tail);
+        if (req.method === 'POST' && killMatch !== null) {
+          if (!String(req.headers['content-type'] ?? '').toLowerCase().includes('application/json')) {
+            return json(res, 415, { ok: false, error: 'content-type must be application/json' });
+          }
+          let body = {};
+          try {
+            body = await readJson(req);
+          } catch {
+            body = {};
+          }
+          const result = backgroundSessions.kill(decodeURIComponent(killMatch[1]), body?.reason);
+          if (!result.ok) return json(res, 404, result);
+          return json(res, 200, result);
+        }
         return json(res, 404, { ok: false, error: 'not found' });
       } catch (error) {
         return json(res, 500, { ok: false, error: String(error?.message ?? error) });
@@ -1468,7 +1584,7 @@ function attachAgent(ctx, config, agent) {
     const branch = agent.ctx.isolate('shell');
     const fiber = branch.plugin({
       name: 'shell-switch-agent',
-      inject: ['subprocess', 'sandbox', 'sandboxPolicy'],
+      inject: ['subprocess', 'sandbox', 'sandboxPolicy', 'tools'],
       async apply(inner) {
         // Deferred here so creating an Agent costs nothing until it really needs
         // a shell tool; every call is memoized after the first Agent.
@@ -1484,9 +1600,12 @@ function attachAgent(ctx, config, agent) {
         // PowerShell selection. Mounting the unused one and hiding it would
         // need a deny filter, which cannot mask scope-local tools.
         const wantPwsh = wantPowerShellTool();
+        // `run_in_background` is disabled: background work is provided by this
+        // plugin's own detached `bg_*` tools (see below), which neither need nor
+        // touch the DSH job registry. That keeps one coherent background story.
         const tools = wantPwsh
           ? [[modules.toolPwsh, 'pwsh', undefined]]
-          : [[modules.toolBash, 'bash', { enableRunInBackground: true }]];
+          : [[modules.toolBash, 'bash', { enableRunInBackground: false }]];
         const mounted = [];
         for (const [tool, label, toolConfig] of tools) {
           const toolFiber = inner.plugin(tool, toolConfig);
@@ -1501,6 +1620,25 @@ function attachAgent(ctx, config, agent) {
               debug('tool-failed', label, diagnostics.error);
             },
           ));
+        }
+        // Mount the background tools beside whichever shell tool this selection
+        // uses: they work for bash, WSL and PowerShell alike (the resolver picks
+        // the dialect), and run detached processes that outlive the call.
+        if (backgroundSessions !== null && backgroundConfig(config).enabled) {
+          const kit = await toolKit();
+          const bgDefs = buildBackgroundTools({
+            sessions: backgroundSessions,
+            resolve: ({ cwd, command }) => resolveShellArgv(config, command, cwd),
+            defineTool: kit.defineTool,
+            ToolArgsError: kit.ToolArgsError,
+          });
+          for (const def of bgDefs) {
+            const reg = inner.tools.register(def);
+            mounted.push(Promise.resolve(reg).then(
+              () => debug('bg-tool-active', def.name, agent.id ?? 'unknown'),
+              (error) => debug('bg-tool-failed', def.name, String(error?.stack ?? error)),
+            ));
+          }
         }
         // Only now can a filter name both tools, so the visible one is chosen
         // once the mounts settle rather than at Agent creation. The mount
@@ -1545,6 +1683,26 @@ function detachAgent(agent) {
  * @param {Record<string, unknown>} config - the validated row config.
  */
 export function apply(ctx, config) {
+  // Create the shared background manager once, before any Agent attaches so
+  // their `bg_*` tools have a live sessions store to register against. It is
+  // disposed (sweep timer only; jobs keep running) with this row's fiber.
+  ctx.effect(() => {
+    const bg = backgroundConfig(config);
+    if (!bg.enabled) return () => {};
+    backgroundSessions = new BackgroundSessions({
+      maxLogBytes: bg.maxLogBytes,
+      maxJobs: bg.maxJobs,
+      debug: (...parts) => debug('bg', ...parts),
+    });
+    return () => {
+      try {
+        backgroundSessions?.dispose();
+      } catch {
+        // ignore
+      }
+      backgroundSessions = null;
+    };
+  }, 'dsh-shell-switch: background sessions');
   ctx.effect(() => {
     const agents = ctx.get('agents');
     for (const agent of agents?.list?.() ?? []) attachAgent(ctx, config, agent);
