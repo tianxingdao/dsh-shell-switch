@@ -399,14 +399,34 @@ window.__ModuleLoader__.load({
       dot: (status) => ({ width: '8px', height: '8px', borderRadius: '50%', flex: '0 0 auto', background: status === 'running' ? 'var(--dsw-alias-state-success-primary)' : status === 'failed' ? 'var(--dsw-alias-state-error-primary)' : status === 'orphan' ? '#e0a800' : 'var(--dsw-alias-label-secondary)' }),
       label: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
       statusText: { fontSize: '11px', color: 'var(--dsw-alias-label-secondary)', flex: '0 0 auto' },
-      log: { margin: 0, padding: '8px 10px', background: 'var(--dsw-alias-bg-layer-2)', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: '11px', lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: '240px', overflow: 'auto', borderTop: '1px solid var(--dsw-alias-border-l1)' },
+      // --- terminal log: a fixed dark palette independent of the light/dark
+      // theme, so it always reads as a real console. Colors are hard-coded on
+      // purpose (a terminal is dark); no theme tokens leak in.
+      term: { margin: 0, background: '#0d1117', color: '#c9d1d9', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', fontSize: '11.5px', lineHeight: 1.55, borderRadius: '8px', border: '1px solid #21262d', overflow: 'auto', boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.5)' },
+      termChrome: { display: 'flex', alignItems: 'center', gap: '6px', padding: '6px 10px', background: '#161b22', borderBottom: '1px solid #21262d', borderTopLeftRadius: '8px', borderTopRightRadius: '8px' },
+      termDot: (c) => ({ width: '9px', height: '9px', borderRadius: '50%', background: c }),
+      termTitle: { flex: '1 1 auto', fontSize: '11px', color: '#8b949e', marginLeft: '4px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+      termBody: { padding: '8px 0', display: 'block' },
+      termLine: { display: 'flex', alignItems: 'flex-start', whiteSpace: 'pre-wrap', wordBreak: 'break-word', padding: '0 10px 0 0' },
+      gutter: { flex: '0 0 auto', width: '40px', textAlign: 'right', paddingRight: '10px', paddingLeft: '8px', color: '#484f58', userSelect: 'none', WebkitUserSelect: 'none' },
+      lineText: { flex: '1 1 auto', minWidth: 0 },
+      lineErrBg: { background: 'rgba(248,81,73,0.14)' },
+      lineWarnBg: { background: 'rgba(187,128,9,0.14)' },
+      tokTime: { color: '#7d8590' },
+      tokErr: { color: '#ff7b72', fontWeight: 600 },
+      tokWarn: { color: '#d29922', fontWeight: 600 },
+      tokInfo: { color: '#58a6ff' },
+      tokDebug: { color: '#8b949e' },
+      tokStr: { color: '#a5d6ff' },
+      tokNum: { color: '#79c0ff' },
+      tokUrl: { color: '#56d4dd', textDecoration: 'underline' },
+      tokPath: { color: '#d2a8ff' },
+      tokStack: { color: '#8b949e' },
       logBar: { display: 'flex', alignItems: 'center', gap: '6px', padding: '5px 10px', borderTop: '1px solid var(--dsw-alias-border-l1)', background: 'var(--dsw-alias-bg-layer-1)', flexWrap: 'wrap' },
       logSearch: { flex: '1 1 120px', minWidth: '80px', padding: '3px 7px', fontSize: '11px', borderRadius: '6px', border: '1px solid var(--dsw-alias-border-l1)', background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)' },
       followOn: { padding: '3px 8px', fontSize: '11px', cursor: 'pointer', borderRadius: '6px', border: '1px solid transparent', background: 'var(--dsw-alias-brand-primary)', color: '#fff' },
       followOff: { padding: '3px 8px', fontSize: '11px', cursor: 'pointer', borderRadius: '6px', border: '1px solid var(--dsw-alias-border-l1)', background: 'transparent', color: 'var(--dsw-alias-label-secondary)' },
-      logLineErr: { color: 'var(--dsw-alias-state-error-primary)' },
-      logLineWarn: { color: '#d98c00' },
-      mark: { background: 'rgba(255,200,0,0.45)', color: 'inherit', borderRadius: '2px' },
+      mark: { background: 'rgba(255,210,0,0.55)', color: '#0d1117', borderRadius: '2px' },
       modalMask: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px' },
       modalBox: { display: 'flex', flexDirection: 'column', width: '90vw', maxWidth: '1100px', height: '85vh', background: 'var(--dsw-alias-bg-layer-3, var(--dsw-alias-bg-layer-2))', borderRadius: '12px', overflow: 'hidden', border: '1px solid var(--dsw-alias-border-l1)' },
       modalHead: { display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 14px', borderBottom: '1px solid var(--dsw-alias-border-l1)' },
@@ -489,40 +509,146 @@ window.__ModuleLoader__.load({
         setFollow(atBottom);
       };
 
-      /** Split into lines and, when searching, wrap matches in <mark>. */
+      /**
+       * Colorize one plain line into tokens: a leading timestamp, then the
+       * level keyword, URLs, quoted strings, paths, stack frames, and numbers.
+       * Only used when NO search is active (search keeps plain text so the
+       * match highlight stays legible).
+       */
+      const ansiColor = (code) => {
+        // Standard + bright foreground SGR codes → readable-on-dark colors.
+        switch (code) {
+          case 30: case 90: return '#8b949e'; // black/gray
+          case 31: case 91: return '#ff7b72'; // red
+          case 32: case 92: return '#7ee787'; // green
+          case 33: case 93: return '#e3b341'; // yellow
+          case 34: case 94: return '#79c0ff'; // blue
+          case 35: case 95: return '#d2a8ff'; // magenta
+          case 36: case 96: return '#56d4dd'; // cyan
+          case 37: case 97: return '#c9d1d9'; // white
+          default: return undefined;
+        }
+      };
+
+      /**
+       * Parse ANSI SGR color escapes (java/Spring logs are full of them) into
+       * colored spans, so a colorized log renders as its intended colors rather
+       * than a wall of `[34mINFO[0;39m`. Non-SGR sequences (cursor moves, etc.)
+       * are stripped.
+       * @param {string} line - one raw log line, possibly with escapes.
+       * @returns {Array} react nodes.
+       */
+      const parseAnsi = (line) => {
+        const nodes = [];
+        const re = /\x1b\[([0-9;]*)m|\x1b\[[0-9;]*[A-Za-z]/g;
+        let last = 0;
+        let color;
+        let key = 0;
+        let m;
+        while ((m = re.exec(line)) !== null) {
+          if (m.index > last) {
+            const seg = line.slice(last, m.index);
+            nodes.push(color ? h('span', { key: `a${key++}`, style: { color } }, seg) : seg);
+          }
+          if (m[1] !== undefined) {
+            for (const part of m[1].split(';')) {
+              const code = part === '' ? 0 : Number(part);
+              if (code === 0 || code === 39) color = undefined;
+              else if (ansiColor(code) !== undefined) color = ansiColor(code);
+              // bold(1)/dim(2)/underline(4) etc. are ignored; color is enough.
+            }
+          }
+          last = re.lastIndex;
+        }
+        if (last < line.length) {
+          const seg = line.slice(last);
+          nodes.push(color ? h('span', { key: `a${key++}`, style: { color } }, seg) : seg);
+        }
+        return nodes.length > 0 ? nodes : [line];
+      };
+
+      /** True when the raw text carries ANSI SGR escapes. */
+      const hasAnsi = /\x1b\[[0-9;]*m/.test(text);
+
+      const tokenize = (line) => {
+        const nodes = [];
+        let rest = line;
+        let key = 0;
+        // Leading timestamp: 2026-11-18T..., [12:34:56], 12:34:56.789
+        const tsMatch = /^(\[?\d{2,4}[-/:.]\d{2}[-/:.]\d{2}(?:[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?)?\]?)\s?/.exec(rest);
+        if (tsMatch) {
+          nodes.push(h('span', { key: `t${key++}`, style: jobStyles.tokTime }, tsMatch[1]));
+          rest = rest.slice(tsMatch[0].length);
+        }
+        // Split the remainder on a combined token regex, keeping separators.
+        const re = /(\b(?:ERROR|FATAL|SEVERE|Exception|Traceback|PANIC)\b|\b(?:WARN|WARNING|DEPRECATED)\b|\b(?:INFO|DEBUG|TRACE|NOTICE)\b|https?:\/\/[^\s"')]+|"[^"]*"|'[^']*'|\bat\s+[\w$.<>]+\([^)]*\)|[A-Za-z]:\\[^\s"']+|\/(?:[\w.-]+\/)+[\w.-]+|\b\d+(?:\.\d+)?\b)/g;
+        let last = 0;
+        let m;
+        while ((m = re.exec(rest)) !== null) {
+          if (m.index > last) nodes.push(rest.slice(last, m.index));
+          const tok = m[0];
+          let style;
+          if (/^(ERROR|FATAL|SEVERE|Exception|Traceback|PANIC)$/.test(tok)) style = jobStyles.tokErr;
+          else if (/^(WARN|WARNING|DEPRECATED)$/i.test(tok)) style = jobStyles.tokWarn;
+          else if (/^(INFO|DEBUG|TRACE|NOTICE)$/.test(tok)) style = /^(DEBUG|TRACE)$/.test(tok) ? jobStyles.tokDebug : jobStyles.tokInfo;
+          else if (/^https?:\/\//.test(tok)) style = jobStyles.tokUrl;
+          else if (/^["']/.test(tok)) style = jobStyles.tokStr;
+          else if (/^at\s/.test(tok)) style = jobStyles.tokStack;
+          else if (/^[A-Za-z]:\\/.test(tok) || /^\//.test(tok)) style = jobStyles.tokPath;
+          else style = jobStyles.tokNum;
+          nodes.push(h('span', { key: `k${key++}`, style }, tok));
+          last = m.index + tok.length;
+        }
+        if (last < rest.length) nodes.push(rest.slice(last));
+        return nodes;
+      };
+
+      /** Split into terminal lines with a gutter and token coloring. */
       const renderLines = () => {
         if (text.length === 0) {
-          return [h('div', { key: 'empty', style: { color: 'var(--dsw-alias-label-secondary)' } }, t('bgLoadingLog'))];
+          return [h('div', { key: 'empty', style: { color: '#8b949e', padding: '4px 10px' } }, t('bgLoadingLog'))];
         }
         const lines = text.split('\n');
         const q = search.trim();
         const lc = q.toLowerCase();
-        const errorRe = /\b(error|exception|failed|fatal|traceback|panic)\b/i;
+        const errRe = /\b(error|exception|failed|fatal|traceback|panic|severe)\b/i;
         const warnRe = /\b(warn|warning|deprecated)\b/i;
         const out = [];
         for (let i = 0; i < lines.length; i += 1) {
-          const line = lines[i];
-          let children = line;
+          const rawLine = lines[i];
+          // For matching/tinting, work on the ANSI-stripped text.
+          const line = hasAnsi ? rawLine.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '') : rawLine;
+          let content;
           if (q.length > 0 && lc.length > 0) {
+            // Search mode: plain text with <mark> on matches.
             const lcLine = line.toLowerCase();
             if (lcLine.includes(lc)) {
-              children = [];
+              content = [];
               let from = 0;
               let at = lcLine.indexOf(lc, from);
               let key = 0;
               while (at >= 0) {
-                if (at > from) children.push(line.slice(from, at));
-                children.push(h('mark', { key: `m${key++}`, style: jobStyles.mark }, line.slice(at, at + q.length)));
+                if (at > from) content.push(line.slice(from, at));
+                content.push(h('mark', { key: `m${key++}`, style: jobStyles.mark }, line.slice(at, at + q.length)));
                 from = at + q.length;
                 at = lcLine.indexOf(lc, from);
               }
-              if (from < line.length) children.push(line.slice(from));
+              if (from < line.length) content.push(line.slice(from));
+            } else {
+              content = line === '' ? '\u00a0' : line;
             }
+          } else if (hasAnsi) {
+            // A colorized log renders in its own ANSI colors.
+            content = line === '' ? '\u00a0' : parseAnsi(rawLine);
+          } else {
+            content = line === '' ? '\u00a0' : tokenize(line);
           }
-          const lineStyle = q.length > 0
-            ? null
-            : errorRe.test(line) ? jobStyles.logLineErr : warnRe.test(line) ? jobStyles.logLineWarn : null;
-          out.push(h('div', { key: `l${i}`, style: lineStyle }, children === '' ? '\u00a0' : children));
+          const bgStyle = q.length === 0
+            ? errRe.test(line) ? jobStyles.lineErrBg : warnRe.test(line) ? jobStyles.lineWarnBg : null
+            : null;
+          out.push(h('div', { key: `l${i}`, style: { ...jobStyles.termLine, ...(bgStyle ?? {}) }, 'data-line': i + 1 },
+            h('span', { style: jobStyles.gutter }, String(i + 1)),
+            h('span', { style: jobStyles.lineText }, content)));
         }
         return out;
       };
@@ -562,10 +688,19 @@ window.__ModuleLoader__.load({
         h('button', { type: 'button', style: jobStyles.minibtn, onClick: download }, t('bgDownload')),
         h('button', { type: 'button', style: jobStyles.minibtn, onClick: () => setFull((v) => !v) }, big ? t('bgExitFull') : t('bgFullscreen')));
 
+      /** The terminal surface: chrome bar + scrollable body. */
+      const terminal = (bodyRef, bodyStyle, title) => h('div', { style: jobStyles.term },
+        h('div', { style: jobStyles.termChrome },
+          h('span', { style: jobStyles.termDot('#ff5f56') }),
+          h('span', { style: jobStyles.termDot('#ffbd2e') }),
+          h('span', { style: jobStyles.termDot('#27c93f') }),
+          h('span', { style: jobStyles.termTitle }, title ?? '')),
+        h('div', { ref: bodyRef, style: { ...jobStyles.termBody, ...bodyStyle }, onScroll }, renderLines()));
+
       return h('div', null,
         h('div', { style: { display: 'flex', flexDirection: 'column' } },
           toolbar(false),
-          h('div', { ref: boxRef, style: { ...jobStyles.log, maxHeight: '240px' }, onScroll }, renderLines())),
+          terminal(boxRef, { maxHeight: '260px', overflow: 'auto' }, props.job?.label ?? '')),
         full
           ? h('div', { style: jobStyles.modalMask, onClick: (e) => { if (e.target === e.currentTarget) setFull(false); } },
             h('div', { style: jobStyles.modalBox },
@@ -573,7 +708,7 @@ window.__ModuleLoader__.load({
                 h('strong', { style: { flex: '1 1 auto', fontSize: '13px' } }, props.job?.label ?? 'log'),
                 h('button', { type: 'button', style: jobStyles.minibtn, onClick: () => setFull(false) }, '✕')),
               toolbar(true),
-              h('div', { ref: modalBoxRef, style: { ...jobStyles.log, maxHeight: 'none', flex: '1 1 auto', backgroundColor: 'var(--dsw-alias-bg-layer-2)' }, onScroll }, renderLines())))
+              terminal(modalBoxRef, { flex: '1 1 auto', overflow: 'auto', borderRadius: '0 0 8px 8px' }, props.job?.label ?? '')))
           : null);
     }
 
