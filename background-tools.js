@@ -27,6 +27,7 @@
  */
 export function buildBackgroundTools(deps) {
   const { sessions, resolve, defineTool, ToolArgsError } = deps;
+  const sessionCwd = typeof deps.sessionCwd === 'function' ? deps.sessionCwd : undefined;
 
   /** The owner session id of a call, when known. */
   const ownerOf = (exec) => (exec?.agent === undefined ? '' : String(exec.agent.id ?? ''));
@@ -74,7 +75,18 @@ export function buildBackgroundTools(deps) {
       const workdirArg = typeof args?.workdir === 'string' && args.workdir.length > 0 ? args.workdir : undefined;
       let resolved;
       try {
-        resolved = await resolve({ cwd: workdirArg, command, agent: exec?.agent });
+        // Resolve the working directory: an explicit `workdir` wins; otherwise
+        // the session workspace (like the `bash` tool), falling back to the
+        // process cwd when no Agent/workingDirectory service is available.
+        let cwd = workdirArg;
+        if (cwd === undefined && typeof sessionCwd === 'function' && exec?.agent !== undefined) {
+          try {
+            cwd = await sessionCwd(exec.agent, exec?.signal);
+          } catch {
+            cwd = undefined;
+          }
+        }
+        resolved = await resolve({ cwd, command, agent: exec?.agent });
       } catch (error) {
         return { ok: false, error: String(error?.message ?? error) };
       }

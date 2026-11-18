@@ -1584,7 +1584,7 @@ function attachAgent(ctx, config, agent) {
     const branch = agent.ctx.isolate('shell');
     const fiber = branch.plugin({
       name: 'shell-switch-agent',
-      inject: ['subprocess', 'sandbox', 'sandboxPolicy', 'tools'],
+      inject: ['subprocess', 'sandbox', 'sandboxPolicy', 'tools', 'workingDirectory'],
       async apply(inner) {
         // Deferred here so creating an Agent costs nothing until it really needs
         // a shell tool; every call is memoized after the first Agent.
@@ -1629,6 +1629,10 @@ function attachAgent(ctx, config, agent) {
           const bgDefs = buildBackgroundTools({
             sessions: backgroundSessions,
             resolve: ({ cwd, command }) => resolveShellArgv(config, command, cwd),
+            // Default the working directory to the Agent's session workspace,
+            // exactly as the `bash` tool does, so a relative command behaves
+            // the same in the foreground and the background.
+            sessionCwd: (agent, signal) => inner.workingDirectory.ensure(agent, signal),
             defineTool: kit.defineTool,
             ToolArgsError: kit.ToolArgsError,
           });
