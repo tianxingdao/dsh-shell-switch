@@ -156,14 +156,17 @@ export const Config = z.object({
    * Persistent background sessions (a self-contained alternative to
    * `@deepseek-ai/dsh-tool-jobs`): `bg_start`/`bg_output`/`bg_list`/`bg_kill`
    * tools that run real detached processes surviving the call and a restart.
+   *
+   * Plain (non-volatile) fields: schemastery rejects volatile inside a volatile
+   * object, and these are static config, not per-read runtime values.
    */
   background: z.object({
-    enabled: z.boolean().default(true).volatile(),
+    enabled: z.boolean().default(true),
     /** Per-job log cap in bytes; older output is dropped on rotation. */
-    maxLogBytes: z.number().default(DEFAULT_MAX_LOG_BYTES).volatile(),
+    maxLogBytes: z.number().default(DEFAULT_MAX_LOG_BYTES),
     /** How many settled jobs to retain; oldest pruned first. */
-    maxJobs: z.number().default(DEFAULT_MAX_JOBS).volatile(),
-  }).default({}).volatile(),
+    maxJobs: z.number().default(DEFAULT_MAX_JOBS),
+  }).default({}),
 });
 
 /** Append one line to a debug log; diagnostics must never break activation. */
