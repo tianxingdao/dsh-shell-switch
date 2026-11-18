@@ -587,11 +587,33 @@ window.__ModuleLoader__.load({
     function JobsPanel(props) {
       const t = typeof props.t === 'function' ? props.t : (key) => key;
       const scope = props.scope ?? {};
+      const ctx = props.ctx;
       const visible = props.visible !== false;
       const sessionId = String(scope.sessionId ?? '');
       // betterSidebar passes a jump-to-conversation callback for tabs; use it to
       // offer "go to the originating conversation" on each job / group.
-      const jumpTo = typeof props.onSubagentJump === 'function' ? props.onSubagentJump : null;
+      // "Go to conversation" opens the owning conversation in the MAIN view.
+      // Do NOT use onSubagentJump: that callback opens a *subagent* tab
+      // (service.openTab({ type: 'subagent' })), i.e. the Tasks page — not the
+      // conversation. The correct path (per betterSidebar's own builtin) is the
+      // workspace face's `openSession`, which owns main-view selection.
+      const jumpTo = (targetSessionId) => {
+        if (!targetSessionId || targetSessionId === sessionId) return;
+        try {
+          const workspace = ctx && typeof ctx.get === 'function' ? ctx.get('uiWorkspace') : undefined;
+          if (workspace && typeof workspace.openSession === 'function') {
+            workspace.openSession(targetSessionId);
+            return;
+          }
+          const sessions = ctx && typeof ctx.get === 'function' ? ctx.get('sessions') : undefined;
+          if (sessions && typeof sessions.open === 'function') {
+            sessions.open(targetSessionId);
+            return;
+          }
+        } catch (err) {
+          try { console.error('[dsh-shell-switch] open conversation failed:', err); } catch {}
+        }
+      };
       const [view, setView] = React.useState('session'); // 'session' | 'all'
       const [data, setData] = React.useState(null); // { active, groups, total } or { jobs }
       const [error, setError] = React.useState(null);
@@ -699,7 +721,7 @@ window.__ModuleLoader__.load({
         const isOpen = openLog === job.id;
         const live = job.status === 'running' || job.status === 'stopping' || job.status === 'orphan';
         const owner = sessionLabel(job);
-        const canJump = jumpTo !== null && job.sessionId && job.sessionId !== sessionId;
+        const canJump = Boolean(job.sessionId) && job.sessionId !== sessionId;
         return h('div', { key: job.id },
           h('div', { style: jobStyles.row },
             h('span', { style: jobStyles.dot(job.status), title: statusLabel(job.status) }),
@@ -735,7 +757,7 @@ window.__ModuleLoader__.load({
         const collapsible = options.collapsible === true;
         const current = options.current === true;
         const isCollapsed = collapsible && collapsed.current.has(key);
-        const canJump = jumpTo !== null && options.ownerId && options.ownerId !== sessionId;
+        const canJump = Boolean(options.ownerId) && options.ownerId !== sessionId;
         return h('div', { key },
           h('div', { style: jobStyles.groupHead, onClick: collapsible ? () => toggleGroup(key) : undefined },
             collapsible ? h('span', null, isCollapsed ? '▸' : '▾') : null,
