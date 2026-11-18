@@ -61,6 +61,15 @@ window.__ModuleLoader__.load({
       bgJump: 'Go to',
       bgOtherHint: 'Other conversations have',
       bgViewAll: 'view all',
+      bgFollowOn: 'Following',
+      bgFollowOff: 'Follow',
+      bgFollowHint: 'Auto-scroll to the newest output',
+      bgSearchPh: 'Search log…',
+      bgCopy: 'Copy',
+      bgCopied: 'Copied',
+      bgDownload: 'Download',
+      bgFullscreen: 'Fullscreen',
+      bgExitFull: 'Exit',
       bgLoadFailed: 'Could not read the job list',
       bgKillFailed: 'Stop request failed',
       bgStarted: 'started',
@@ -122,6 +131,15 @@ window.__ModuleLoader__.load({
       bgJump: '前往',
       bgOtherHint: '其它会话还有',
       bgViewAll: '查看全部',
+      bgFollowOn: '跟随最新',
+      bgFollowOff: '跟随',
+      bgFollowHint: '自动滚动到最新输出',
+      bgSearchPh: '搜索日志…',
+      bgCopy: '复制',
+      bgCopied: '已复制',
+      bgDownload: '下载',
+      bgFullscreen: '全屏',
+      bgExitFull: '退出',
       bgLoadFailed: '读取任务列表失败',
       bgKillFailed: '停止请求失败',
       bgStarted: '启动于',
@@ -382,6 +400,16 @@ window.__ModuleLoader__.load({
       label: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
       statusText: { fontSize: '11px', color: 'var(--dsw-alias-label-secondary)', flex: '0 0 auto' },
       log: { margin: 0, padding: '8px 10px', background: 'var(--dsw-alias-bg-layer-2)', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: '11px', lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: '240px', overflow: 'auto', borderTop: '1px solid var(--dsw-alias-border-l1)' },
+      logBar: { display: 'flex', alignItems: 'center', gap: '6px', padding: '5px 10px', borderTop: '1px solid var(--dsw-alias-border-l1)', background: 'var(--dsw-alias-bg-layer-1)', flexWrap: 'wrap' },
+      logSearch: { flex: '1 1 120px', minWidth: '80px', padding: '3px 7px', fontSize: '11px', borderRadius: '6px', border: '1px solid var(--dsw-alias-border-l1)', background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)' },
+      followOn: { padding: '3px 8px', fontSize: '11px', cursor: 'pointer', borderRadius: '6px', border: '1px solid transparent', background: 'var(--dsw-alias-brand-primary)', color: '#fff' },
+      followOff: { padding: '3px 8px', fontSize: '11px', cursor: 'pointer', borderRadius: '6px', border: '1px solid var(--dsw-alias-border-l1)', background: 'transparent', color: 'var(--dsw-alias-label-secondary)' },
+      logLineErr: { color: 'var(--dsw-alias-state-error-primary)' },
+      logLineWarn: { color: '#d98c00' },
+      mark: { background: 'rgba(255,200,0,0.45)', color: 'inherit', borderRadius: '2px' },
+      modalMask: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px' },
+      modalBox: { display: 'flex', flexDirection: 'column', width: '90vw', maxWidth: '1100px', height: '85vh', background: 'var(--dsw-alias-bg-layer-3, var(--dsw-alias-bg-layer-2))', borderRadius: '12px', overflow: 'hidden', border: '1px solid var(--dsw-alias-border-l1)' },
+      modalHead: { display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 14px', borderBottom: '1px solid var(--dsw-alias-border-l1)' },
       meta: { padding: '2px 10px 8px', fontSize: '11px', color: 'var(--dsw-alias-label-secondary)', wordBreak: 'break-all' },
       empty: { padding: '18px 12px', textAlign: 'center', color: 'var(--dsw-alias-label-secondary)' },
       err: { padding: '8px 10px', color: 'var(--dsw-alias-state-error-primary)' },
@@ -429,6 +457,127 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Streaming log viewer for one job.
+     *
+     * Renders the accumulated text with a toolbar offering: follow-latest
+     * (auto-scroll), a search box that highlights matches, error/warn line
+     * tinting, copy, download, clear-the-view, and a fullscreen modal. It keeps
+     * its own UI state so the parent stays simple.
+     * @param {object} props - { job, text, t, onClose }.
+     */
+    function LogView(props) {
+      const t = props.t;
+      const text = props.text ?? '';
+      const [follow, setFollow] = React.useState(true);
+      const [search, setSearch] = React.useState('');
+      const [full, setFull] = React.useState(false);
+      const [copied, setCopied] = React.useState(false);
+      const boxRef = React.useRef(null);
+      const modalBoxRef = React.useRef(null);
+
+      // Auto-scroll to the newest line while follow is on.
+      React.useEffect(() => {
+        if (!follow) return;
+        for (const el of [boxRef.current, modalBoxRef.current]) {
+          if (el) el.scrollTop = el.scrollHeight;
+        }
+      }, [text, follow, full]);
+
+      const onScroll = (event) => {
+        const el = event.currentTarget;
+        const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+        setFollow(atBottom);
+      };
+
+      /** Split into lines and, when searching, wrap matches in <mark>. */
+      const renderLines = () => {
+        if (text.length === 0) {
+          return [h('div', { key: 'empty', style: { color: 'var(--dsw-alias-label-secondary)' } }, t('bgLoadingLog'))];
+        }
+        const lines = text.split('\n');
+        const q = search.trim();
+        const lc = q.toLowerCase();
+        const errorRe = /\b(error|exception|failed|fatal|traceback|panic)\b/i;
+        const warnRe = /\b(warn|warning|deprecated)\b/i;
+        const out = [];
+        for (let i = 0; i < lines.length; i += 1) {
+          const line = lines[i];
+          let children = line;
+          if (q.length > 0 && lc.length > 0) {
+            const lcLine = line.toLowerCase();
+            if (lcLine.includes(lc)) {
+              children = [];
+              let from = 0;
+              let at = lcLine.indexOf(lc, from);
+              let key = 0;
+              while (at >= 0) {
+                if (at > from) children.push(line.slice(from, at));
+                children.push(h('mark', { key: `m${key++}`, style: jobStyles.mark }, line.slice(at, at + q.length)));
+                from = at + q.length;
+                at = lcLine.indexOf(lc, from);
+              }
+              if (from < line.length) children.push(line.slice(from));
+            }
+          }
+          const lineStyle = q.length > 0
+            ? null
+            : errorRe.test(line) ? jobStyles.logLineErr : warnRe.test(line) ? jobStyles.logLineWarn : null;
+          out.push(h('div', { key: `l${i}`, style: lineStyle }, children === '' ? '\u00a0' : children));
+        }
+        return out;
+      };
+
+      const download = () => {
+        try {
+          const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `${props.job?.label ? props.job.label.replace(/[^\w.-]+/g, '_').slice(0, 40) : 'job'}.log`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 2000);
+        } catch { /* ignore */ }
+      };
+
+      const copy = async () => {
+        try {
+          await navigator.clipboard.writeText(text);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        } catch { /* ignore */ }
+      };
+
+      const toolbar = (big) => h('div', { style: jobStyles.logBar },
+        h('button', { type: 'button', style: follow ? jobStyles.followOn : jobStyles.followOff, onClick: () => setFollow((v) => !v), title: t('bgFollowHint') },
+          follow ? `⬇ ${t('bgFollowOn')}` : `⬇ ${t('bgFollowOff')}`),
+        h('input', {
+          style: jobStyles.logSearch,
+          placeholder: t('bgSearchPh'),
+          value: search,
+          onChange: (e) => setSearch(e.target.value),
+        }),
+        h('button', { type: 'button', style: jobStyles.minibtn, onClick: copy }, copied ? t('bgCopied') : t('bgCopy')),
+        h('button', { type: 'button', style: jobStyles.minibtn, onClick: download }, t('bgDownload')),
+        h('button', { type: 'button', style: jobStyles.minibtn, onClick: () => setFull((v) => !v) }, big ? t('bgExitFull') : t('bgFullscreen')));
+
+      return h('div', null,
+        h('div', { style: { display: 'flex', flexDirection: 'column' } },
+          toolbar(false),
+          h('div', { ref: boxRef, style: { ...jobStyles.log, maxHeight: '240px' }, onScroll }, renderLines())),
+        full
+          ? h('div', { style: jobStyles.modalMask, onClick: (e) => { if (e.target === e.currentTarget) setFull(false); } },
+            h('div', { style: jobStyles.modalBox },
+              h('div', { style: jobStyles.modalHead },
+                h('strong', { style: { flex: '1 1 auto', fontSize: '13px' } }, props.job?.label ?? 'log'),
+                h('button', { type: 'button', style: jobStyles.minibtn, onClick: () => setFull(false) }, '✕')),
+              toolbar(true),
+              h('div', { ref: modalBoxRef, style: { ...jobStyles.log, maxHeight: 'none', flex: '1 1 auto', backgroundColor: 'var(--dsw-alias-bg-layer-2)' }, onScroll }, renderLines())))
+          : null);
+    }
+
+    /**
      * The Background-jobs page. Two views (this conversation / all), a per-
      * session tree, a streaming log per job, and a per-row stop button.
      *
@@ -449,9 +598,14 @@ window.__ModuleLoader__.load({
       const [expanded, setExpanded] = React.useState(() => new Set());
       const [openLog, setOpenLog] = React.useState(null); // jobId
       const [logText, setLogText] = React.useState({});
-      const [logOffset, setLogOffset] = React.useState({});
+      const [logFollow, setLogFollow] = React.useState(true); // auto-scroll to newest
+      const [logFull, setLogFull] = React.useState(false); // fullscreen modal
       const [busy, setBusy] = React.useState({});
       const collapsed = React.useRef(new Set());
+      // Per-job read offsets live in a ref, not state: advancing the offset must
+      // not re-run the polling effect (which state would, causing tight refetch
+      // loops). The effect reads/writes this ref only.
+      const logOffsetRef = React.useRef({});
 
       const load = React.useCallback(async () => {
         try {
@@ -480,19 +634,21 @@ window.__ModuleLoader__.load({
         return () => clearInterval(timer);
       }, [visible, data, load]);
 
-      // Poll the open job's log.
+      // Poll the open job's log. Offset is kept in a ref so advancing it does
+      // not restart this effect; the effect depends only on which job is open.
       React.useEffect(() => {
         if (openLog === null || !visible) return undefined;
+        const jobId = openLog;
         let cancelled = false;
         const tick = async () => {
           try {
-            const offset = logOffset[openLog] ?? 0;
-            const read = await request(`/jobs/${encodeURIComponent(openLog)}/log?offset=${offset}`);
+            const offset = logOffsetRef.current[jobId] ?? 0;
+            const read = await request(`/jobs/${encodeURIComponent(jobId)}/log?offset=${offset}`);
             if (cancelled) return;
             if (typeof read.text === 'string' && read.text.length > 0) {
-              setLogText((prev) => ({ ...prev, [openLog]: (prev[openLog] ?? '') + read.text }));
+              setLogText((prev) => ({ ...prev, [jobId]: (prev[jobId] ?? '') + read.text }));
             }
-            setLogOffset((prev) => ({ ...prev, [openLog]: typeof read.offset === 'number' ? read.offset : offset }));
+            logOffsetRef.current[jobId] = typeof read.offset === 'number' ? read.offset : offset;
           } catch {
             // A missing log file (just started) is not an error worth surfacing.
           }
@@ -500,7 +656,7 @@ window.__ModuleLoader__.load({
         void tick();
         const timer = setInterval(() => { void tick(); }, 1500);
         return () => { cancelled = true; clearInterval(timer); };
-      }, [openLog, visible, logOffset]);
+      }, [openLog, visible]);
 
       const kill = async (jobId) => {
         setBusy((prev) => ({ ...prev, [jobId]: true }));
@@ -559,8 +715,12 @@ window.__ModuleLoader__.load({
               : null),
           isOpen
             ? h('div', null,
-              h('pre', { style: jobStyles.log }, (logText[job.id] ?? '') || t('bgLoadingLog')),
-              h('div', { style: jobStyles.meta }, `${job.shellLabel ? `${job.shellLabel} · ` : ''}${job.cwd}`))
+              h('div', { style: jobStyles.meta }, `${job.shellLabel ? `${job.shellLabel} · ` : ''}${job.cwd}`),
+              h(LogView, {
+                job,
+                t,
+                text: logText[job.id] ?? '',
+              }))
             : null);
       };
 
