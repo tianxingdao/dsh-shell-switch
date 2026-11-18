@@ -41,7 +41,7 @@ window.__ModuleLoader__.load({
       bgNav: 'Background jobs',
       bgDescription: 'Detached background processes started with bg_start — they keep running after the tool call and the harness restart.',
       bgThis: 'This conversation',
-      bgAll: 'All',
+      bgAll: 'All conversations',
       bgRefresh: 'Refresh',
       bgRunning: 'running',
       bgExited: 'exited',
@@ -58,6 +58,9 @@ window.__ModuleLoader__.load({
       bgLoadingLog: 'Loading…',
       bgOtherSessions: 'Other conversations',
       bgNoOwner: 'No owner',
+      bgJump: 'Go to',
+      bgOtherHint: 'Other conversations have',
+      bgViewAll: 'view all',
       bgLoadFailed: 'Could not read the job list',
       bgKillFailed: 'Stop request failed',
       bgStarted: 'started',
@@ -99,7 +102,7 @@ window.__ModuleLoader__.load({
       bgNav: '后台任务',
       bgDescription: '由 bg_start 启动的分离后台进程，工具调用结束后仍继续运行（重启 harness 也不受影响）。',
       bgThis: '本会话',
-      bgAll: '全部',
+      bgAll: '全部会话',
       bgRefresh: '刷新',
       bgRunning: '运行中',
       bgExited: '已结束',
@@ -116,6 +119,9 @@ window.__ModuleLoader__.load({
       bgLoadingLog: '加载中…',
       bgOtherSessions: '其它会话',
       bgNoOwner: '无归属',
+      bgJump: '前往',
+      bgOtherHint: '其它会话还有',
+      bgViewAll: '查看全部',
       bgLoadFailed: '读取任务列表失败',
       bgKillFailed: '停止请求失败',
       bgStarted: '启动于',
@@ -367,6 +373,7 @@ window.__ModuleLoader__.load({
       segBtn: (active) => ({ padding: '3px 10px', fontSize: '12px', cursor: 'pointer', border: 'none', background: active ? 'var(--dsw-alias-brand-primary)' : 'transparent', color: active ? '#fff' : 'var(--dsw-alias-label-secondary)' }),
       spacer: { flex: '1 1 auto' },
       minibtn: { padding: '3px 9px', fontSize: '12px', cursor: 'pointer', borderRadius: '7px', border: '1px solid var(--dsw-alias-border-l1)', background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)' },
+      jumpbtn: { padding: '2px 7px', fontSize: '11px', cursor: 'pointer', borderRadius: '6px', border: 'none', background: 'transparent', color: 'var(--dsw-alias-brand-primary)', textDecoration: 'underline', whiteSpace: 'nowrap' },
       scroller: { flex: '1 1 auto', overflow: 'auto', minHeight: 0 },
       groupHead: { display: 'flex', alignItems: 'center', gap: '6px', padding: '7px 10px 4px', fontSize: '11px', color: 'var(--dsw-alias-label-secondary)', cursor: 'pointer', userSelect: 'none' },
       groupCount: { opacity: 0.7 },
@@ -391,10 +398,34 @@ window.__ModuleLoader__.load({
       return `${hrs}h ${m % 60}m`;
     }
 
-    /** Short id for a session (first 8 chars). */
+    /** Short id for a session: drop the `session-` prefix, keep 8 hex chars. */
     function shortSession(id) {
       if (typeof id !== 'string' || id.length === 0) return '';
-      return id.length > 8 ? id.slice(0, 8) : id;
+      const core = id.startsWith('session-') ? id.slice('session-'.length) : id;
+      return core.length > 8 ? core.slice(0, 8) : core;
+    }
+
+    /** Last path segment of a directory (both / and \ separators). */
+    function baseName(p) {
+      if (typeof p !== 'string' || p.length === 0) return '';
+      const parts = p.replace(/[\\/]+$/, '').split(/[\\/]/);
+      return parts[parts.length - 1] || p;
+    }
+
+    /**
+     * A human label for an owner session: its working-directory basename when
+     * known (a project name reads far better than a uuid), plus a short id so
+     * two sessions in the same directory stay distinguishable.
+     * @param {{ sessionId?: string, sessionCwd?: string, cwd?: string }} job - any job from that session.
+     * @returns {string} the display label.
+     */
+    function sessionLabel(job) {
+      const id = shortSession(job?.sessionId);
+      const dir = baseName(job?.sessionCwd || job?.cwd || '');
+      if (dir && id) return `${dir} · ${id}`;
+      if (dir) return dir;
+      if (id) return id;
+      return '';
     }
 
     /**
@@ -409,6 +440,9 @@ window.__ModuleLoader__.load({
       const scope = props.scope ?? {};
       const visible = props.visible !== false;
       const sessionId = String(scope.sessionId ?? '');
+      // betterSidebar passes a jump-to-conversation callback for tabs; use it to
+      // offer "go to the originating conversation" on each job / group.
+      const jumpTo = typeof props.onSubagentJump === 'function' ? props.onSubagentJump : null;
       const [view, setView] = React.useState('session'); // 'session' | 'all'
       const [data, setData] = React.useState(null); // { active, groups, total } or { jobs }
       const [error, setError] = React.useState(null);
@@ -505,14 +539,20 @@ window.__ModuleLoader__.load({
         }
       };
 
-      const renderJob = (job) => {
+      const renderJob = (job, showOwner) => {
         const isOpen = openLog === job.id;
         const live = job.status === 'running' || job.status === 'stopping' || job.status === 'orphan';
+        const owner = sessionLabel(job);
+        const canJump = jumpTo !== null && job.sessionId && job.sessionId !== sessionId;
         return h('div', { key: job.id },
           h('div', { style: jobStyles.row },
             h('span', { style: jobStyles.dot(job.status), title: statusLabel(job.status) }),
             h('span', { style: jobStyles.label, title: job.command ?? job.label }, job.label),
+            showOwner === true && owner
+              ? h('span', { style: jobStyles.statusText, title: `session ${job.sessionId}` }, owner)
+              : null,
             h('span', { style: jobStyles.statusText }, `${statusLabel(job.status)} · ${elapsed(job.startedAt, job.endedAt)}`),
+            canJump ? h('button', { type: 'button', style: jobStyles.jumpbtn, title: t('bgJump'), onClick: () => { try { jumpTo(job.sessionId); } catch {} } }, t('bgJump')) : null,
             h('button', { type: 'button', style: jobStyles.minibtn, onClick: () => toggleLog(job.id) }, isOpen ? t('bgCloseLog') : t('bgOpenLog')),
             live
               ? h('button', { type: 'button', style: jobStyles.minibtn, disabled: busy[job.id] === true, onClick: () => kill(job.id) }, busy[job.id] ? t('bgKilling') : t('bgKill'))
@@ -524,53 +564,74 @@ window.__ModuleLoader__.load({
             : null);
       };
 
-      const renderGroup = (key, title, jobs, collapsible) => {
+      /**
+       * One collapsible group. `ownerId` (when set and not this conversation)
+       * turns the header into a jump target too; `current` marks the reader's
+       * own conversation so its group is never collapsed.
+       */
+      const renderGroup = (key, title, jobs, opts) => {
         if (!Array.isArray(jobs) || jobs.length === 0) return null;
-        const isCollapsed = collapsible === true && collapsed.current.has(key);
+        const options = opts ?? {};
+        const collapsible = options.collapsible === true;
+        const current = options.current === true;
+        const isCollapsed = collapsible && collapsed.current.has(key);
+        const canJump = jumpTo !== null && options.ownerId && options.ownerId !== sessionId;
         return h('div', { key },
-          collapsible === true
-            ? h('div', { style: jobStyles.groupHead, onClick: () => toggleGroup(key) },
-              h('span', null, isCollapsed ? '▸' : '▾'),
-              h('span', null, title),
-              h('span', { style: jobStyles.groupCount }, ` (${jobs.length})`))
-            : h('div', { style: jobStyles.groupHead }, h('span', null, title), h('span', { style: jobStyles.groupCount }, ` (${jobs.length})`)),
-          isCollapsed ? null : jobs.map(renderJob));
+          h('div', { style: jobStyles.groupHead, onClick: collapsible ? () => toggleGroup(key) : undefined },
+            collapsible ? h('span', null, isCollapsed ? '▸' : '▾') : null,
+            h('span', { style: current ? { color: 'var(--dsw-alias-label-primary)', fontWeight: 600 } : null }, title),
+            h('span', { style: jobStyles.groupCount }, ` (${jobs.length})`),
+            canJump
+              ? h('button', { type: 'button', style: jobStyles.jumpbtn, title: t('bgJump'), onClick: (e) => { e.stopPropagation(); try { jumpTo(options.ownerId); } catch {} } }, t('bgJump'))
+              : null),
+          isCollapsed ? null : jobs.map((job) => renderJob(job, options.showOwner === true)));
+      };
+
+      /** Group a flat job list by owner session, this conversation first. */
+      const groupByOwner = (jobs) => {
+        const byOwner = new Map();
+        for (const job of jobs) {
+          const key = job.sessionId || '';
+          if (!byOwner.has(key)) byOwner.set(key, []);
+          byOwner.get(key).push(job);
+        }
+        return byOwner;
       };
 
       const total = data === null ? 0 : (data.jobs ? data.jobs.length : (data.total ?? 0));
       const body = [];
       if (data !== null) {
         if (view === 'all' && Array.isArray(data.jobs)) {
-          // Group all jobs by owner session, this conversation first.
-          const byOwner = new Map();
-          for (const job of data.jobs) {
-            const key = job.sessionId || '';
-            if (!byOwner.has(key)) byOwner.set(key, []);
-            byOwner.get(key).push(job);
-          }
+          const byOwner = groupByOwner(data.jobs);
           const mine = byOwner.get(sessionId) ?? [];
           byOwner.delete(sessionId);
-          if (mine.length > 0) body.push(renderGroup('this', t('bgThis'), mine, false));
+          if (mine.length > 0) body.push(renderGroup('this', t('bgThis'), mine, { current: true }));
           let index = 0;
           for (const [owner, jobs] of byOwner) {
             index += 1;
-            const title = owner ? `${t('bgOtherSessions')} · ${shortSession(owner)}` : t('bgNoOwner');
-            body.push(renderGroup(`g${index}`, title, jobs, true));
+            const title = owner ? sessionLabel(jobs[0]) || shortSession(owner) : t('bgNoOwner');
+            body.push(renderGroup(`g${index}`, title, jobs, { collapsible: true, ownerId: owner }));
           }
           if (total === 0) body.push(h('div', { key: 'empty', style: jobStyles.empty }, t('bgEmpty')));
         } else if (view === 'session') {
+          // This-conversation view shows ONLY this conversation's jobs. Other
+          // conversations live in the 全部 view — earlier they leaked in here,
+          // which read as "本会话 shows other sessions' jobs".
           const active = Array.isArray(data.active) ? data.active : [];
-          const groups = Array.isArray(data.groups) ? data.groups : [];
-          if (active.length === 0 && groups.every((g) => (g.jobs ?? []).length === 0)) {
+          if (active.length === 0) {
             body.push(h('div', { key: 'empty', style: jobStyles.empty }, t('bgEmptySession')));
           } else {
-            if (active.length > 0) body.push(renderGroup('this', t('bgThis'), active, false));
-            let index = 0;
-            for (const group of groups) {
-              index += 1;
-              const title = group.sessionId ? `${t('bgOtherSessions')} · ${shortSession(group.sessionId)}` : t('bgNoOwner');
-              body.push(renderGroup(`g${index}`, title, group.jobs, true));
-            }
+            body.push(renderGroup('this', t('bgThis'), active, { current: true }));
+          }
+          // Tell the reader when other conversations have jobs they can see in 全部.
+          const otherCount = (Array.isArray(data.groups) ? data.groups : [])
+            .reduce((sum, g) => sum + ((g.jobs ?? []).length), 0);
+          if (otherCount > 0) {
+            body.push(h('div', {
+              key: 'other-hint',
+              style: { padding: '8px 10px', fontSize: '11px', color: 'var(--dsw-alias-label-secondary)', cursor: 'pointer' },
+              onClick: () => setView('all'),
+            }, `${t('bgOtherHint')} ${otherCount} · ${t('bgViewAll')} →`));
           }
         }
       }
