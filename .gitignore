@@ -12,3 +12,5 @@ Thumbs.db
 .idea/
 .vscode/
 commitmsg.tmp
+cmsg.tmp
+*.tmp
