@@ -34,6 +34,8 @@ import path from 'node:path';
 const DEFAULT_MAX_LOG_BYTES = 8 * 1024 * 1024;
 /** Default cap on retained (non-running) jobs, oldest pruned first. */
 const DEFAULT_MAX_JOBS = 50;
+/** Auto-cleanup keeps this many newest STOPPED jobs; older ones are deleted. */
+const DEFAULT_AUTO_CLEANUP_KEEP = 20;
 /** How often the liveness sweep re-checks a running job's pid. */
 const SWEEP_MS = 4000;
 
@@ -110,6 +112,10 @@ export class BackgroundSessions {
   constructor(options = {}) {
     this.maxLogBytes = Number.isFinite(options.maxLogBytes) ? options.maxLogBytes : DEFAULT_MAX_LOG_BYTES;
     this.maxJobs = Number.isFinite(options.maxJobs) ? options.maxJobs : DEFAULT_MAX_JOBS;
+    // Auto-cleanup of STOPPED jobs: when on, keep only the newest
+    // `autoCleanupKeep` settled jobs and delete the rest (log file included).
+    this.autoCleanup = options.autoCleanup === true;
+    this.autoCleanupKeep = Number.isFinite(options.autoCleanupKeep) ? options.autoCleanupKeep : DEFAULT_AUTO_CLEANUP_KEEP;
     this.debug = options.debug ?? (() => {});
     /** @type {Map<string, object>} jobId → record */
     this.jobs = new Map();
@@ -199,6 +205,67 @@ export class BackgroundSessions {
       }
       this.jobs.delete(victim.id);
     }
+  }
+
+  /**
+   * Run auto-cleanup: keep only the newest `autoCleanupKeep` STOPPED jobs and
+   * delete the rest (log files included). Never touches a live job. No-op when
+   * auto-cleanup is off.
+   * @returns {number} how many jobs were deleted.
+   */
+  applyAutoCleanup() {
+    if (!this.autoCleanup) return 0;
+    const stopped = [...this.jobs.values()]
+      .filter((job) => job.status !== 'running' && job.status !== 'stopping' && job.status !== 'orphan')
+      .sort((a, b) => (b.endedAt ?? b.startedAt ?? 0) - (a.endedAt ?? a.startedAt ?? 0));
+    let removed = 0;
+    for (const victim of stopped.slice(this.autoCleanupKeep)) {
+      try {
+        fs.unlinkSync(victim.logPath);
+      } catch {
+        // already gone
+      }
+      this.jobs.delete(victim.id);
+      removed += 1;
+    }
+    if (removed > 0) this.save();
+    return removed;
+  }
+
+  /**
+   * Delete every STOPPED job owned by an optional session (or every session
+   * when omitted), log files included. Live jobs are left alone.
+   * @param {string} [sessionId] - restrict to one owner; omit for all.
+   * @returns {number} how many jobs were deleted.
+   */
+  removeStopped(sessionId) {
+    let removed = 0;
+    for (const [id, job] of [...this.jobs.entries()]) {
+      if (job.status === 'running' || job.status === 'stopping' || job.status === 'orphan') continue;
+      if (sessionId !== undefined && job.sessionId !== sessionId) continue;
+      try {
+        fs.unlinkSync(job.logPath);
+      } catch {
+        // already gone
+      }
+      this.jobs.delete(id);
+      removed += 1;
+    }
+    if (removed > 0) this.save();
+    return removed;
+  }
+
+  /**
+   * Update the auto-cleanup settings at runtime (from a settings POST) and run
+   * one pass immediately so the change is visible without waiting for a sweep.
+   * @param {{enabled?: boolean, keep?: number}} next - partial settings.
+   * @returns {{enabled: boolean, keep: number, removed: number}} the applied state.
+   */
+  setAutoCleanup(next) {
+    if (next && typeof next.enabled === 'boolean') this.autoCleanup = next.enabled;
+    if (next && Number.isFinite(next.keep)) this.autoCleanupKeep = Math.max(0, Math.floor(next.keep));
+    const removed = this.applyAutoCleanup();
+    return { enabled: this.autoCleanup, keep: this.autoCleanupKeep, removed };
   }
 
   /**
@@ -318,6 +385,8 @@ export class BackgroundSessions {
         }
       }
       if (changed) this.save();
+      // Reap stopped jobs per the auto-cleanup policy while we are already here.
+      this.applyAutoCleanup();
       if (running === 0 && ![...this.jobs.values()].some((job) => job.status === 'orphan')) {
         // Nothing to watch; let the interval idle out. It restarts on the next
         // `start`/`kill`.
@@ -485,4 +554,4 @@ export class BackgroundSessions {
 }
 
 /** Module default caps, exported for the row config. */
-export { DEFAULT_MAX_LOG_BYTES, DEFAULT_MAX_JOBS };
+export { DEFAULT_MAX_LOG_BYTES, DEFAULT_MAX_JOBS, DEFAULT_AUTO_CLEANUP_KEEP };

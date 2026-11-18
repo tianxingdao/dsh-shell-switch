@@ -26,7 +26,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { BackgroundSessions, DEFAULT_MAX_JOBS, DEFAULT_MAX_LOG_BYTES } from './background.js';
+import { BackgroundSessions, DEFAULT_MAX_JOBS, DEFAULT_MAX_LOG_BYTES, DEFAULT_AUTO_CLEANUP_KEEP } from './background.js';
 import { buildBackgroundTools } from './background-tools.js';
 
 const API = '/api/dsh-shell-switch';
@@ -128,7 +128,7 @@ function toolKit() {
  * the cells around each field, so plain values come back regardless of whether
  * the row config delivered a raw object or a schemastery cell.
  * @param {Record<string, unknown>} config - the row config.
- * @returns {{ enabled: boolean, maxLogBytes: number, maxJobs: number }} resolved values.
+ * @returns {{ enabled: boolean, maxLogBytes: number, maxJobs: number, autoCleanup: boolean, autoCleanupKeep: number }} resolved values.
  */
 function backgroundConfig(config) {
   const raw = valueOf(config?.background, undefined);
@@ -137,6 +137,8 @@ function backgroundConfig(config) {
     enabled: valueOf(inner.enabled, true) !== false,
     maxLogBytes: Number(valueOf(inner.maxLogBytes, DEFAULT_MAX_LOG_BYTES)),
     maxJobs: Number(valueOf(inner.maxJobs, DEFAULT_MAX_JOBS)),
+    autoCleanup: valueOf(inner.autoCleanup, false) === true,
+    autoCleanupKeep: Number(valueOf(inner.autoCleanupKeep, DEFAULT_AUTO_CLEANUP_KEEP)),
   };
 }
 
@@ -166,6 +168,10 @@ export const Config = z.object({
     maxLogBytes: z.number().default(DEFAULT_MAX_LOG_BYTES),
     /** How many settled jobs to retain; oldest pruned first. */
     maxJobs: z.number().default(DEFAULT_MAX_JOBS),
+    /** Auto-delete old STOPPED jobs; when on, keep only `autoCleanupKeep`. */
+    autoCleanup: z.boolean().default(false),
+    /** How many newest stopped jobs auto-cleanup keeps. */
+    autoCleanupKeep: z.number().default(DEFAULT_AUTO_CLEANUP_KEEP),
   }).default({}),
 });
 
@@ -1407,8 +1413,9 @@ function registerRoutes(ctx, config) {
         if (req.method === 'GET' && tail === '/jobs') {
           const active = url.searchParams.get('session') ?? '';
           const all = url.searchParams.get('all') === '1';
-          if (all) return json(res, 200, { ok: true, jobs: backgroundSessions.list() });
-          return json(res, 200, { ok: true, ...backgroundSessions.grouped(active) });
+          const auto = { enabled: backgroundSessions.autoCleanup, keep: backgroundSessions.autoCleanupKeep };
+          if (all) return json(res, 200, { ok: true, jobs: backgroundSessions.list(), autoCleanup: auto });
+          return json(res, 200, { ok: true, ...backgroundSessions.grouped(active), autoCleanup: auto });
         }
         const logMatch = /^\/jobs\/([^/]+)\/log$/.exec(tail);
         if (req.method === 'GET' && logMatch !== null) {
@@ -1432,6 +1439,45 @@ function registerRoutes(ctx, config) {
           const result = backgroundSessions.kill(decodeURIComponent(killMatch[1]), body?.reason);
           if (!result.ok) return json(res, 404, result);
           return json(res, 200, result);
+        }
+        // Delete one STOPPED job (log included). Live jobs are refused.
+        const removeMatch = /^\/jobs\/([^/]+)\/remove$/.exec(tail);
+        if (req.method === 'POST' && removeMatch !== null) {
+          if (!String(req.headers['content-type'] ?? '').toLowerCase().includes('application/json')) {
+            return json(res, 415, { ok: false, error: 'content-type must be application/json' });
+          }
+          const result = backgroundSessions.remove(decodeURIComponent(removeMatch[1]));
+          if (!result.ok) return json(res, 400, result);
+          return json(res, 200, result);
+        }
+        // Delete every STOPPED job (optionally scoped to one session).
+        if (req.method === 'POST' && tail === '/jobs/cleanup') {
+          if (!String(req.headers['content-type'] ?? '').toLowerCase().includes('application/json')) {
+            return json(res, 415, { ok: false, error: 'content-type must be application/json' });
+          }
+          let body = {};
+          try {
+            body = await readJson(req);
+          } catch {
+            body = {};
+          }
+          const sessionId = typeof body?.session === 'string' && body.session.length > 0 ? body.session : undefined;
+          const removed = backgroundSessions.removeStopped(sessionId);
+          return json(res, 200, { ok: true, removed });
+        }
+        // Update the auto-cleanup policy at runtime.
+        if (req.method === 'POST' && tail === '/jobs/auto-cleanup') {
+          if (!String(req.headers['content-type'] ?? '').toLowerCase().includes('application/json')) {
+            return json(res, 415, { ok: false, error: 'content-type must be application/json' });
+          }
+          let body = {};
+          try {
+            body = await readJson(req);
+          } catch {
+            body = {};
+          }
+          const applied = backgroundSessions.setAutoCleanup({ enabled: body?.enabled, keep: body?.keep });
+          return json(res, 200, { ok: true, ...applied });
         }
         return json(res, 404, { ok: false, error: 'not found' });
       } catch (error) {
@@ -1699,6 +1745,8 @@ export function apply(ctx, config) {
     backgroundSessions = new BackgroundSessions({
       maxLogBytes: bg.maxLogBytes,
       maxJobs: bg.maxJobs,
+      autoCleanup: bg.autoCleanup,
+      autoCleanupKeep: bg.autoCleanupKeep,
       debug: (...parts) => debug('bg', ...parts),
     });
     return () => {

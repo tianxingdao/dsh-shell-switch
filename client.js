@@ -61,6 +61,15 @@ window.__ModuleLoader__.load({
       bgJump: 'Open conversation',
       bgOtherHint: 'Other conversations have',
       bgViewAll: 'view all',
+      bgRunningGroup: 'Running',
+      bgStoppedGroup: 'Stopped',
+      bgCleanup: 'Clear',
+      bgCleanupStopped: 'Clear stopped',
+      bgCleanupHint: 'Delete finished jobs and their logs (running jobs are kept)',
+      bgCleanupFailed: 'Cleanup failed',
+      bgAutoCleanup: 'Auto-clean stopped',
+      bgAutoKeep: 'keep newest',
+      bgAutoHint: 'When on, only the newest N stopped jobs are kept; older ones are deleted automatically',
       bgFollowOn: 'Following',
       bgFollowOff: 'Follow',
       bgFollowHint: 'Auto-scroll to the newest output',
@@ -131,6 +140,15 @@ window.__ModuleLoader__.load({
       bgJump: '前往会话',
       bgOtherHint: '其它会话还有',
       bgViewAll: '查看全部',
+      bgRunningGroup: '运行中',
+      bgStoppedGroup: '已停止',
+      bgCleanup: '清理',
+      bgCleanupStopped: '清理已停止',
+      bgCleanupHint: '删除已结束的任务及其日志（运行中的任务会保留）',
+      bgCleanupFailed: '清理失败',
+      bgAutoCleanup: '自动清理已停止',
+      bgAutoKeep: '保留最近',
+      bgAutoHint: '开启后只保留最近 N 个已停止任务，更早的自动删除',
       bgFollowOn: '跟随最新',
       bgFollowOff: '跟随',
       bgFollowHint: '自动滚动到最新输出',
@@ -433,6 +451,11 @@ window.__ModuleLoader__.load({
       meta: { padding: '2px 10px 8px', fontSize: '11px', color: 'var(--dsw-alias-label-secondary)', wordBreak: 'break-all' },
       empty: { padding: '18px 12px', textAlign: 'center', color: 'var(--dsw-alias-label-secondary)' },
       err: { padding: '8px 10px', color: 'var(--dsw-alias-state-error-primary)' },
+      subHead: { display: 'flex', alignItems: 'center', gap: '6px', padding: '5px 10px 3px 20px', fontSize: '11px', color: 'var(--dsw-alias-label-secondary)' },
+      subHeadLabel: { fontWeight: 600, letterSpacing: '0.02em' },
+      autoRow: { display: 'flex', alignItems: 'center', gap: '10px', padding: '5px 10px', borderTop: '1px solid var(--dsw-alias-border-l1)', flexWrap: 'wrap' },
+      autoLabel: { display: 'inline-flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: 'var(--dsw-alias-label-secondary)', cursor: 'pointer' },
+      autoNum: { width: '48px', padding: '2px 5px', fontSize: '11px', borderRadius: '6px', border: '1px solid var(--dsw-alias-border-l1)', background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)' },
     };
 
     /** Human-friendly elapsed "3m 12s". */
@@ -758,6 +781,7 @@ window.__ModuleLoader__.load({
       const [logFollow, setLogFollow] = React.useState(true); // auto-scroll to newest
       const [logFull, setLogFull] = React.useState(false); // fullscreen modal
       const [busy, setBusy] = React.useState({});
+      const [autoCleanup, setAutoCleanup] = React.useState({ enabled: false, keep: 20 });
       const collapsed = React.useRef(new Set());
       // Per-job read offsets live in a ref, not state: advancing the offset must
       // not re-run the polling effect (which state would, causing tight refetch
@@ -769,6 +793,7 @@ window.__ModuleLoader__.load({
           const query = view === 'all' ? '/jobs?all=1' : `/jobs?session=${encodeURIComponent(sessionId)}`;
           const next = await request(query);
           setData(next);
+          if (next && next.autoCleanup) setAutoCleanup(next.autoCleanup);
           setError(null);
         } catch (failure) {
           setError(`${t('bgLoadFailed')}：${failure.message}`);
@@ -831,6 +856,57 @@ window.__ModuleLoader__.load({
         }
       };
 
+      const removeJob = async (jobId) => {
+        setBusy((prev) => ({ ...prev, [jobId]: true }));
+        try {
+          await request(`/jobs/${encodeURIComponent(jobId)}/remove`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({}),
+          });
+          // Forget this job's cached log so a same-named future job starts clean.
+          setOpenLog((cur) => (cur === jobId ? null : cur));
+          setLogText((prev) => { const copy = { ...prev }; delete copy[jobId]; return copy; });
+          delete logOffsetRef.current[jobId];
+          await load();
+        } catch (failure) {
+          setError(`${t('bgCleanupFailed')}：${failure.message}`);
+        } finally {
+          setBusy((prev) => ({ ...prev, [jobId]: false }));
+        }
+      };
+
+      /** Delete every stopped job in this conversation (or all in 全部 view). */
+      const cleanupStopped = async (sessionIdArg) => {
+        try {
+          await request('/jobs/cleanup', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(typeof sessionIdArg === 'string' && sessionIdArg.length > 0 ? { session: sessionIdArg } : {}),
+          });
+          setOpenLog(null);
+          await load();
+        } catch (failure) {
+          setError(`${t('bgCleanupFailed')}：${failure.message}`);
+        }
+      };
+
+      const updateAutoCleanup = async (next) => {
+        const merged = { enabled: next.enabled !== undefined ? next.enabled : autoCleanup.enabled, keep: next.keep !== undefined ? next.keep : autoCleanup.keep };
+        setAutoCleanup(merged);
+        try {
+          const applied = await request('/jobs/auto-cleanup', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(merged),
+          });
+          setAutoCleanup({ enabled: applied.enabled, keep: applied.keep });
+          await load();
+        } catch (failure) {
+          setError(`${t('bgCleanupFailed')}：${failure.message}`);
+        }
+      };
+
       const toggleGroup = (key) => {
         const set = collapsed.current;
         if (set.has(key)) set.delete(key); else set.add(key);
@@ -869,7 +945,7 @@ window.__ModuleLoader__.load({
             h('button', { type: 'button', style: jobStyles.minibtn, onClick: () => toggleLog(job.id) }, isOpen ? t('bgCloseLog') : t('bgOpenLog')),
             live
               ? h('button', { type: 'button', style: jobStyles.minibtn, disabled: busy[job.id] === true, onClick: () => kill(job.id) }, busy[job.id] ? t('bgKilling') : t('bgKill'))
-              : null),
+              : h('button', { type: 'button', style: jobStyles.minibtn, disabled: busy[job.id] === true, title: t('bgCleanupHint'), onClick: () => removeJob(job.id) }, t('bgCleanup'))),
           isOpen
             ? h('div', null,
               h('div', { style: jobStyles.meta }, `${job.shellLabel ? `${job.shellLabel} · ` : ''}${job.cwd}`),
@@ -881,10 +957,14 @@ window.__ModuleLoader__.load({
             : null);
       };
 
+      /** Is a job live (running/stopping/orphan)? */
+      const isLive = (job) => job.status === 'running' || job.status === 'stopping' || job.status === 'orphan';
+
       /**
-       * One collapsible group. `ownerId` (when set and not this conversation)
-       * turns the header into a jump target too; `current` marks the reader's
-       * own conversation so its group is never collapsed.
+       * One conversation group. Inside it jobs split into a RUNNING section and
+       * a STOPPED section, each with its own sub-header. The stopped header
+       * carries a "clean up" action; live jobs are never cleaned. `ownerId`
+       * (another conversation) makes the header a jump target too.
        */
       const renderGroup = (key, title, jobs, opts) => {
         if (!Array.isArray(jobs) || jobs.length === 0) return null;
@@ -893,6 +973,21 @@ window.__ModuleLoader__.load({
         const current = options.current === true;
         const isCollapsed = collapsible && collapsed.current.has(key);
         const canJump = Boolean(options.ownerId) && options.ownerId !== sessionId;
+        const live = jobs.filter(isLive);
+        const stopped = jobs.filter((job) => !isLive(job));
+
+        const subHead = (subKey, label, count, withCleanup) => h('div', { style: jobStyles.subHead, key: subKey },
+          h('span', { style: jobStyles.subHeadLabel }, label),
+          h('span', { style: jobStyles.groupCount }, ` (${count})`),
+          withCleanup && count > 0
+            ? h('button', {
+              type: 'button',
+              style: jobStyles.jumpbtn,
+              title: t('bgCleanupHint'),
+              onClick: (e) => { e.stopPropagation(); cleanupStopped(options.cleanupSession); },
+            }, t('bgCleanupStopped'))
+            : null);
+
         return h('div', { key },
           h('div', { style: jobStyles.groupHead, onClick: collapsible ? () => toggleGroup(key) : undefined },
             collapsible ? h('span', null, isCollapsed ? '▸' : '▾') : null,
@@ -901,7 +996,11 @@ window.__ModuleLoader__.load({
             canJump
               ? h('button', { type: 'button', style: jobStyles.jumpbtn, title: t('bgJump'), onClick: (e) => { e.stopPropagation(); try { jumpTo(options.ownerId); } catch {} } }, t('bgJump'))
               : null),
-          isCollapsed ? null : jobs.map((job) => renderJob(job, options.showOwner === true)));
+          isCollapsed ? null : h('div', null,
+            live.length > 0 ? subHead(`${key}-run`, t('bgRunningGroup'), live.length, false) : null,
+            live.length > 0 ? live.map((job) => renderJob(job, options.showOwner === true)) : null,
+            stopped.length > 0 ? subHead(`${key}-stop`, t('bgStoppedGroup'), stopped.length, true) : null,
+            stopped.length > 0 ? stopped.map((job) => renderJob(job, options.showOwner === true)) : null));
       };
 
       /** Group a flat job list by owner session, this conversation first. */
@@ -922,12 +1021,12 @@ window.__ModuleLoader__.load({
           const byOwner = groupByOwner(data.jobs);
           const mine = byOwner.get(sessionId) ?? [];
           byOwner.delete(sessionId);
-          if (mine.length > 0) body.push(renderGroup('this', t('bgThis'), mine, { current: true }));
+          if (mine.length > 0) body.push(renderGroup('this', t('bgThis'), mine, { current: true, cleanupSession: sessionId }));
           let index = 0;
           for (const [owner, jobs] of byOwner) {
             index += 1;
             const title = owner ? sessionLabel(jobs[0]) || shortSession(owner) : t('bgNoOwner');
-            body.push(renderGroup(`g${index}`, title, jobs, { collapsible: true, ownerId: owner }));
+            body.push(renderGroup(`g${index}`, title, jobs, { collapsible: true, ownerId: owner, cleanupSession: owner }));
           }
           if (total === 0) body.push(h('div', { key: 'empty', style: jobStyles.empty }, t('bgEmpty')));
         } else if (view === 'session') {
@@ -938,7 +1037,7 @@ window.__ModuleLoader__.load({
           if (active.length === 0) {
             body.push(h('div', { key: 'empty', style: jobStyles.empty }, t('bgEmptySession')));
           } else {
-            body.push(renderGroup('this', t('bgThis'), active, { current: true }));
+            body.push(renderGroup('this', t('bgThis'), active, { current: true, cleanupSession: sessionId }));
           }
           // Tell the reader when other conversations have jobs they can see in 全部.
           const otherCount = (Array.isArray(data.groups) ? data.groups : [])
@@ -960,7 +1059,27 @@ window.__ModuleLoader__.load({
             h('button', { type: 'button', style: jobStyles.segBtn(view === 'all'), onClick: () => setView('all') }, t('bgAll'))),
           h('span', { style: jobStyles.spacer }),
           h('span', { style: jobStyles.statusText }, `${total}`),
+          view === 'session'
+            ? h('button', { type: 'button', style: jobStyles.minibtn, title: t('bgCleanupHint'), onClick: () => cleanupStopped(sessionId) }, t('bgCleanupStopped'))
+            : h('button', { type: 'button', style: jobStyles.minibtn, title: t('bgCleanupHint'), onClick: () => cleanupStopped() }, t('bgCleanupStopped')),
           h('button', { type: 'button', style: jobStyles.minibtn, onClick: () => load() }, t('bgRefresh'))),
+        // Auto-cleanup controls: a toggle plus the "keep N newest stopped" count.
+        h('div', { style: jobStyles.autoRow },
+          h('label', { style: jobStyles.autoLabel, title: t('bgAutoHint') },
+            h('input', { type: 'checkbox', checked: autoCleanup.enabled === true, onChange: (e) => updateAutoCleanup({ enabled: e.target.checked }) }),
+            h('span', null, t('bgAutoCleanup'))),
+          autoCleanup.enabled
+            ? h('span', { style: jobStyles.autoLabel },
+              h('span', null, t('bgAutoKeep')),
+              h('input', {
+                type: 'number', min: 0, max: 999, value: autoCleanup.keep,
+                style: jobStyles.autoNum,
+                onChange: (e) => {
+                  const n = Number.parseInt(e.target.value, 10);
+                  if (Number.isFinite(n)) updateAutoCleanup({ keep: Math.max(0, n) });
+                },
+              }))
+            : null),
         error !== null ? h('div', { style: jobStyles.err }, error) : null,
         h('div', { style: jobStyles.scroller }, body));
     }
