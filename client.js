@@ -600,25 +600,32 @@ window.__ModuleLoader__.load({
           locale: NS,
           inject: () => ({ t }),
         }, ShellSection));
-        // Register the background-jobs page into dsh-better-sidebar when that
-        // plugin is present. It is optional, so the service is looked up (not
-        // declared in `inject`) and skipped silently when missing.
-        ctx.effect(() => {
-          const service = typeof ctx.get === 'function' ? ctx.get('betterSidebar') : undefined;
-          if (service === undefined || typeof service.registerTab !== 'function') return () => {};
-          const dispose = service.registerTab({
-            id: 'dsh-shell-switch:jobs',
-            title: () => t('bgNav'),
-            description: () => t('bgDescription'),
-            icon: () => h('span', { style: { fontSize: '15px' } }, '▤'),
-            order: 62,
-            single: true,
-            component: (props) => h(JobsPanel, { ...props, t }),
-          });
-          return () => {
-            if (typeof dispose === 'function') dispose();
-          };
-        }, 'dsh-shell-switch: better-sidebar jobs tab');
+        // Register the background-jobs page into dsh-better-sidebar. That
+        // plugin is OPTIONAL, so `betterSidebar` is not declared in this
+        // plugin's module-level `inject` (a missing service would block the
+        // whole client from loading). Instead `ctx.inject([...], cb)` runs the
+        // callback exactly when the service becomes available and never when it
+        // is absent — the correct optional-dependency form. A plain
+        // `ctx.get('betterSidebar')` inside `ctx.effect` raced the service and
+        // ran before it existed, so the tab silently never registered.
+        ctx.inject(['betterSidebar'], (serviceCtx) => {
+          serviceCtx.effect(() => {
+            const service = serviceCtx.betterSidebar ?? (typeof serviceCtx.get === 'function' ? serviceCtx.get('betterSidebar') : undefined);
+            if (service === undefined || typeof service.registerTab !== 'function') return () => {};
+            const dispose = service.registerTab({
+              id: 'dsh-shell-switch:jobs',
+              title: () => t('bgNav'),
+              description: () => t('bgDescription'),
+              icon: () => h('span', { style: { fontSize: '15px' } }, '▤'),
+              order: 62,
+              single: true,
+              component: (props) => h(JobsPanel, { ...props, t }),
+            });
+            return () => {
+              if (typeof dispose === 'function') dispose();
+            };
+          }, 'dsh-shell-switch: better-sidebar jobs tab');
+        });
       },
     };
   },
