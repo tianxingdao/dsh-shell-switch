@@ -9,8 +9,9 @@ On Windows the shipped `pwsh` tool is hidden as well, leaving `bash` as the only
 ```
 Before: "ls" had to be written as Get-ChildItem (pwsh tool), or rely on dsh-ops' bundled
         MSYS bash, which often fails inside the DSH sandbox.
-After:  "ls" runs in Niubash bash 5.3 directly, with the same output, exit codes,
-        background jobs and spill files as the official bash tool.
+After:  "ls" runs in Niubash bash 5.3 directly, with the same output, exit codes
+        and spill files as the official bash tool; long-lived background
+        processes use the plugin's own bg_* tools.
 ```
 
 ---
@@ -169,7 +170,7 @@ Key points:
 
 #### Sidebar panel (`dsh-better-sidebar`)
 
-With [`dsh-better-sidebar`](https://github.com/omdsh-dev/DSH-better-sidebar) installed, the plugin registers a "Background jobs" tab via `ctx.betterSidebar.registerTab`: **This conversation / All** views (default prioritizes the open conversation), a **tree grouped by conversation**, a streaming log per job, and one-click stop. Without that plugin the tab is simply not registered.
+With [`dsh-better-sidebar`](https://github.com/omdsh-dev/DSH-better-sidebar) installed, the plugin registers a "Background jobs" tab via `ctx.betterSidebar.registerTab`: **This conversation / All conversations** views (this-conversation shows only its own jobs, with a hint to switch; all groups by conversation, this one first and collapsible), a readable **session label** per group/row (cwd basename + short id) with an **Open conversation** button that jumps to the owning conversation, and a per-job **streaming log** rendered as a **terminal** (dark background, line numbers, ANSI colors / syntax tints, error-row highlighting) with **follow-latest**, **search highlight**, **copy**, **download**, and **fullscreen**; a running job can be stopped in one click. Without that plugin the tab is simply not registered.
 
 > Note: `bg_*` tools and the sidebar tab come from the Host half, so **restarting DSH (reloading this bundle) is required after changing the plugin**; `client.js` is read from disk on demand at `/plugins/<id>/client.js`, so a page refresh picks up client changes.
 
@@ -395,21 +396,6 @@ Logs: `%TEMP%\dsh-shell-switch-debug.log` (written only on mount, tool activatio
 - After an edit: `plugin_manager set_plugin` with `false` then `true` triggers a hot reload (the client half needs a page refresh);
 - Syntax check: `npm run check` (equivalent to `node --check index.js && node --check client.js`);
 - Debug endpoint: `GET /api/dsh-shell-switch/state` (on the machine running DSH).
-
-### Publishing to npm
-
-```bash
-npm login --registry https://registry.npmjs.org/
-npm version patch          # or minor / major
-npm publish                # prepublishOnly runs the syntax check first
-```
-
-`publishConfig.registry` pins npmjs, so the package publishes there even when the user's npmrc points at a mirror. No list resubmission is needed afterwards: the market matches by package name, and the prebuilt install replaces the from-source command.
-
-Two current npm behaviours worth knowing:
-
-- with 2FA set to "Authorization only" an OTP cannot authorise a publish; a granular access token with **Bypass 2FA** is required;
-- npm stages brand-new packages: the first publish creates a public `0.0.0-stage` placeholder and the real version follows, so `npm view` may briefly show `0.0.0-stage`. That is expected.
 
 ## License
 

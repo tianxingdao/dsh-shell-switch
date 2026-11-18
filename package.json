@@ -1,6 +1,6 @@
 {
   "name": "dsh-shell-switch",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Choose which local shell runs DSH bash commands (Niubash, Git Bash, MSYS2) and add a Shell selector page to Settings.",
   "license": "MIT",
   "author": "tianxingdao",
@@ -43,7 +43,8 @@
     "locale/*.json",
     "icon.svg",
     "background.js",
-    "background-tools.js"
+    "background-tools.js",
+    "CHANGELOG.md"
   ],
   "dsh": {
     "bundle": {

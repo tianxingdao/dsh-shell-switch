@@ -8,7 +8,7 @@ Windows 下还会隐藏官方 `pwsh` 工具，让 `bash` 成为唯一的 shell �
 
 ```
 之前：模型想跑 ls → 必须写成 Get-ChildItem（pwsh 工具），或依赖 dsh-ops 自带的 MSYS bash（沙箱里经常起不来）
-之后：模型跑 ls → 直接在 Niubash bash 5.3 里执行，输出、退出码、后台任务、spill 与官方 bash 工具完全一致
+之后：模型跑 ls → 直接在 Niubash bash 5.3 里执行，输出、退出码、spill 与官方 bash 工具一致；常驻后台进程走插件自带的 bg_* 工具
 ```
 
 ---
@@ -210,9 +210,9 @@ bash: {
 
 若安装了 [`dsh-better-sidebar`](https://github.com/omdsh-dev/DSH-better-sidebar)，插件会向它注册一个「后台任务」页（`ctx.betterSidebar.registerTab`）：
 
-- **本会话 / 全部**两个视图，**默认优先显示当前所开会话**的任务；
-- **树形分组**：按会话（`sessionId`）分组，可折叠，本会话置顶；
-- 点开某任务**流式展开日志**（1.5s 增量拉取），运行中可一键**停止**；
+- **本会话 / 全部会话**两个视图：本会话视图只列本会话任务（其它会话另有提示可一键切到全部），全部视图按会话分组、本会话置顶、可折叠；
+- 每组/每行显示**可读的会话标签**（工作目录名 + 短 id），并提供「**前往会话**」按钮直接跳到该任务所属的会话；
+- 点开某任务展开**流式日志**（1.5s 增量），日志区是**终端风格**（深色背景、行号、ANSI 颜色/语法着色、错误行高亮），支持**跟随最新**、**搜索高亮**、**复制**、**下载**、**全屏**；运行中可一键**停止**；
 - 未安装 `dsh-better-sidebar` 时该页静默不注册，其余功能不受影响。
 
 > 提示：`bg_*` 工具与侧栏页都来自 Host 侧，**改动本插件后需重启 DSH（重新加载该 bundle）生效**；客户端 `client.js` 由 `/plugins/<id>/client.js` 按需从磁盘读取，改后刷新页面即可。
@@ -399,21 +399,6 @@ plugin_manager remove_bundle  target = dsh-shell-switch
 - 修改后：`plugin_manager set_plugin` 先 `false` 再 `true` 触发热重载（客户端需刷新页面）；
 - 语法检查：`npm run check`（等价于 `node --check index.js && node --check client.js`）；
 - 调试端点：`GET /api/dsh-shell-switch/state`（在 DSH 进程所在机器上）。
-
-### 发布到 npm
-
-```bash
-npm login --registry https://registry.npmjs.org/
-npm version patch          # 或 minor / major
-npm publish                # prepublishOnly 会先跑语法检查
-```
-
-包已声明 `publishConfig.registry`，因此即使用户 npmrc 指向镜像也会发布到 npmjs。发布后无需重新提交列表：市场按包名匹配，预构建安装会自动取代源码安装。
-
-两点与新版 npm 相关：
-
-- 账号开了 2FA 且为「仅登录（Authorization only）」时，OTP 不能用于发布，需要带 **Bypass 2FA** 的 granular access token；
-- npm 对**新包**启用了分阶段发布（staged publishing），首次发布会自动生成一个公开的 `0.0.0-stage` 占位版本，真正版本随后写入；`npm view` 可能短暂显示 `0.0.0-stage`，属正常现象。
 
 ## License
 
