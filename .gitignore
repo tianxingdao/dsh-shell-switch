@@ -14,3 +14,4 @@ Thumbs.db
 commitmsg.tmp
 cmsg.tmp
 *.tmp
+.verify-*.png
