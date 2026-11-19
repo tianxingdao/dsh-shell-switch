@@ -48,6 +48,7 @@ window.__ModuleLoader__.load({
       bgKilled: 'killed',
       bgFailed: 'failed',
       bgOrphan: 'detached',
+      bgAdopted: 'adopted after restart',
       bgStopping: 'stopping',
       bgEmpty: 'No background jobs yet.',
       bgEmptySession: 'No background jobs in this conversation.',
@@ -127,6 +128,7 @@ window.__ModuleLoader__.load({
       bgKilled: '已停止',
       bgFailed: '失败',
       bgOrphan: '已脱管',
+      bgAdopted: '重启后接续',
       bgStopping: '停止中',
       bgEmpty: '暂无后台任务。',
       bgEmptySession: '本会话暂无后台任务。',
@@ -414,7 +416,7 @@ window.__ModuleLoader__.load({
       groupHead: { display: 'flex', alignItems: 'center', gap: '6px', padding: '7px 10px 4px', fontSize: '11px', color: 'var(--dsw-alias-label-secondary)', cursor: 'pointer', userSelect: 'none' },
       groupCount: { opacity: 0.7 },
       row: { display: 'flex', alignItems: 'center', gap: '7px', padding: '6px 10px', borderTop: '1px solid var(--dsw-alias-border-l1)' },
-      dot: (status) => ({ width: '8px', height: '8px', borderRadius: '50%', flex: '0 0 auto', background: status === 'running' ? 'var(--dsw-alias-state-success-primary)' : status === 'failed' ? 'var(--dsw-alias-state-error-primary)' : status === 'orphan' ? '#e0a800' : 'var(--dsw-alias-label-secondary)' }),
+      dot: (status) => ({ width: '8px', height: '8px', borderRadius: '50%', flex: '0 0 auto', background: status === 'running' ? 'var(--dsw-alias-state-success-primary)' : status === 'failed' ? 'var(--dsw-alias-state-error-primary)' : 'var(--dsw-alias-label-secondary)' }),
       label: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
       statusText: { fontSize: '11px', color: 'var(--dsw-alias-label-secondary)', flex: '0 0 auto' },
       // --- terminal log: a fixed dark palette independent of the light/dark
@@ -923,7 +925,6 @@ window.__ModuleLoader__.load({
           case 'stopping': return t('bgStopping');
           case 'killed': return t('bgKilled');
           case 'failed': return t('bgFailed');
-          case 'orphan': return t('bgOrphan');
           default: return t('bgExited');
         }
       };
@@ -940,7 +941,7 @@ window.__ModuleLoader__.load({
             showOwner === true && owner
               ? h('span', { style: jobStyles.statusText, title: `session ${job.sessionId}` }, owner)
               : null,
-            h('span', { style: jobStyles.statusText }, `${statusLabel(job.status)} · ${elapsed(job.startedAt, job.endedAt)}`),
+            h('span', { style: jobStyles.statusText }, `${statusLabel(job.status)}${job.adopted ? ` · ${t('bgAdopted')}` : ''} · ${elapsed(job.startedAt, job.endedAt)}`),
             canJump ? h('button', { type: 'button', style: jobStyles.jumpbtn, title: t('bgJump'), onClick: () => { try { jumpTo(job.sessionId); } catch {} } }, t('bgJump')) : null,
             h('button', { type: 'button', style: jobStyles.minibtn, onClick: () => toggleLog(job.id) }, isOpen ? t('bgCloseLog') : t('bgOpenLog')),
             live

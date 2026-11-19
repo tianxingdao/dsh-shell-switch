@@ -399,6 +399,13 @@ export class BackgroundSessions {
 
   /** The public view of one record (no argv/env, no fs paths beyond the log). */
   public(record) {
+    // A job whose process is still alive IS "running" from the user's point of
+    // view. The internal `orphan` marker only means "this manager did not spawn
+    // it in this process" (it survived a restart); it is not a distinct
+    // user-facing state, so surface it as `running` and keep the distinction in
+    // `adopted` for anything that cares.
+    const adopted = record.status === 'orphan';
+    const status = adopted ? 'running' : record.status;
     return {
       id: record.id,
       kind: record.kind,
@@ -409,7 +416,8 @@ export class BackgroundSessions {
       sessionId: record.sessionId,
       sessionCwd: record.sessionCwd,
       pid: record.pid,
-      status: record.status,
+      status,
+      adopted,
       exitCode: record.exitCode ?? null,
       signal: record.signal ?? null,
       startedAt: record.startedAt,
