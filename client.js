@@ -49,6 +49,7 @@ window.__ModuleLoader__.load({
       bgFailed: 'failed',
       bgOrphan: 'detached',
       bgAdopted: 'adopted after restart',
+      bgJobId: 'job id',
       bgStopping: 'stopping',
       bgEmpty: 'No background jobs yet.',
       bgEmptySession: 'No background jobs in this conversation.',
@@ -129,6 +130,7 @@ window.__ModuleLoader__.load({
       bgFailed: '失败',
       bgOrphan: '已脱管',
       bgAdopted: '重启后接续',
+      bgJobId: '任务 id',
       bgStopping: '停止中',
       bgEmpty: '暂无后台任务。',
       bgEmptySession: '本会话暂无后台任务。',
@@ -419,6 +421,7 @@ window.__ModuleLoader__.load({
       dot: (status) => ({ width: '8px', height: '8px', borderRadius: '50%', flex: '0 0 auto', background: status === 'running' ? 'var(--dsw-alias-state-success-primary)' : status === 'failed' ? 'var(--dsw-alias-state-error-primary)' : 'var(--dsw-alias-label-secondary)' }),
       label: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
       statusText: { fontSize: '11px', color: 'var(--dsw-alias-label-secondary)', flex: '0 0 auto' },
+      idTag: { fontSize: '10.5px', color: 'var(--dsw-alias-label-secondary)', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', flex: '0 0 auto', opacity: 0.75 },
       // --- terminal log: a fixed dark palette independent of the light/dark
       // theme, so it always reads as a real console. Colors are hard-coded on
       // purpose (a terminal is dark); no theme tokens leak in.
@@ -934,10 +937,14 @@ window.__ModuleLoader__.load({
         const live = job.status === 'running' || job.status === 'stopping' || job.status === 'orphan';
         const owner = sessionLabel(job);
         const canJump = Boolean(job.sessionId) && job.sessionId !== sessionId;
+        // A short id + pid so two same-named jobs (e.g. a dead record and the
+        // live one) are distinguishable at a glance.
+        const shortId = String(job.id ?? '').replace(/^bg-/, '');
         return h('div', { key: job.id },
           h('div', { style: jobStyles.row },
             h('span', { style: jobStyles.dot(job.status), title: statusLabel(job.status) }),
             h('span', { style: jobStyles.label, title: job.command ?? job.label }, job.label),
+            h('span', { style: jobStyles.idTag, title: `${t('bgJobId')} ${job.id} · pid ${job.pid ?? '?'}` }, `#${shortId}${job.pid ? ` · ${job.pid}` : ''}`),
             showOwner === true && owner
               ? h('span', { style: jobStyles.statusText, title: `session ${job.sessionId}` }, owner)
               : null,
