@@ -50,6 +50,7 @@ Windows 上的 DSH 默认有两条 shell 路径：
 - **`bash` 工具**：复用官方 `@deepseek-ai/dsh-tool-bash` 与 `@deepseek-ai/dsh-bash-sandbox`，只把执行文件换成你选的 shell。因此超时、输出 spill、沙箱升级、`[exit code: N]` 标记等行为与官方一致。
 - **持久后台会话**：自带 `bg_start` / `bg_output` / `bg_list` / `bg_kill` 四个工具，启动**真正 detach 的常驻进程**（工具调用结束、harness 重启后仍在跑），可增量读日志、按整棵进程树停止。**不依赖** `@deepseek-ai/dsh-tool-jobs`。装了 `dsh-better-sidebar` 时还会注册一个「后台任务」侧栏页（本会话 / 全部、树形分组、流式日志、一键停止）。
 - **设置 → Shell 选择器**：下拉框列出本机所有 shell（含版本、路径），支持保存、恢复默认、重新扫描；保存后**下一条命令即生效**，无需重启。
+- **内置 Niubash（自带 bash）**：插件可内置一份 [Niubash](https://github.com/unixwin/niubash)（MIT，Rust 重写的原生 bash 5.3）。**Windows 默认开启、开箱即用**（系统本身没有 bash）；**Linux/macOS 默认不启用**（系统已有 bash，作为可选项）。首次按当前平台从官方 release 下载解压到 `%DSH_HOME%/embedded-niubash`，命令经官方 `--ec`（编码命令）通道执行，天然免引号穿透。详见下文。
 - **Windows 下隐藏 `pwsh`**：官方 `pwsh` 工具无法卸载，但只要本插件启用，就对每个 Agent 加作用域级屏蔽，`bash` 成为唯一 shell 工具；停用插件即恢复。
 - **不破坏现有能力**：不改宿主的 `ctx.shell` 执行器，`pwsh` 执行器行原样保留；其他预设工具（文件、搜索、子代理等）不受影响。
 - **尊重沙箱**：`bash` 命令始终按当前会话的 `ctx.sandboxPolicy` 执行，插件不提供任何绕过（**例外**：`bg_start` 起的脱离后台进程不受沙箱约束，见下文）。
@@ -156,6 +157,19 @@ bash: {
 - **保存**：写入 `%DSH_HOME%\shell-switch.json`，下一条命令生效；
 - **恢复默认**：清除选择，回落到插件配置的 `shell` / `shellPath` / 自动检测；
 - **重新扫描**：完整重扫注册表并刷新版本（装了新 shell 后点一下；这一次会等待扫描完成，其余时刻都走缓存）。
+
+### 内置 Niubash（自带 bash，跨平台）
+
+插件可以**自带一份 bash**，让机器上没装任何 bash 也能开箱即用：
+
+- **Windows：默认开启**——系统本身没有 bash，内置的 Niubash 就是"开箱即用"的首选项。首次按 `process.platform`/`arch` 从官方 release 下载对应包（win-x64 / win-arm64），解压到 `%DSH_HOME%/embedded-niubash/v<版本>/`；选择器顶部多一个「内置」分组，选中即可用。
+- **Linux / macOS：默认不启用**——系统已有 bash，内置只是可选项（默认隐藏，可在配置 `embedded.enabled: true` 打开）。
+- **命令通道**：内置 Niubash 走官方 `--ec <base64>`（`-EncodedCommand` 的 bash 版），命令原样传递、天然免引号穿透；退出码、UTF-8 输出与普通 bash 一致。
+- **安装/移除**：设置页「Shell 选择器」里有「内置 Niubash」卡片——未安装时显示「下载内置 bash」，已安装时显示「移除内置 bash」。`embedded.autoInstall` 为真时首启也会在后台自动下载。
+- **版本与许可**：内置版本由插件固定的 `EMBEDDED_VERSION` 决定；Niubash 为 **MIT** 许可，可随插件再分发。体积约：压缩包 Windows ~11 MB（解压 ~16 MB）、Linux ~8 MB。
+- **平台映射**：`win32`(x64/arm64)、`linux`(x64/arm64)、`darwin`(arm64/x64)；不支持的平台不出现该项。`embedded.baseUrl` 可指向镜像。
+
+> 说明：内置的 `niu.exe` 官方尚未做代码签名，个别环境首次运行可能触发 SmartScreen 提示；从插件目录直接 spawn 一般无碍。
 
 ### 选择 PowerShell（Windows）
 
@@ -277,6 +291,11 @@ profile patch 中的 `shell-switch` 行：
 | `background.enabled` | `true` | 是否启用持久后台会话（`bg_*` 工具与侧栏页） |
 | `background.maxLogBytes` | `8388608` | 单个后台任务日志上限（超出从头丢弃） |
 | `background.maxJobs` | `50` | 保留的后台任务条数（先淘汰最旧的已结束任务） |
+| `background.autoCleanup` | `false` | 自动清理已停止任务（只保留最近 `autoCleanupKeep` 个） |
+| `background.autoCleanupKeep` | `20` | 自动清理时保留的已停止任务数 |
+| `embedded.enabled` | Windows `true` / 其他 `false` | 是否在选择器提供「内置 Niubash」 |
+| `embedded.autoInstall` | `true` | 缺失时首启是否后台自动下载内置 bash |
+| `embedded.baseUrl` | `https://github.com/unixwin/niubash/releases/download` | 内置 bash 的下载源（可指向镜像） |
 
 选择优先级：设置页保存的路径 → `shellPath` → `shell` → 自动检测。
 

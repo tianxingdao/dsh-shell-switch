@@ -4,6 +4,26 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] — 2026-11-23
+
+### Added
+
+- **Embedded Niubash** — the plugin can ship a self-contained bash so a machine
+  with no bash (Windows) works out of the box. On Windows it is on by default;
+  on Linux/macOS it is off by default (a system bash already exists) but
+  selectable. It downloads the official Niubash (MIT) release for the current
+  platform (win/linux/macos × x64/arm64) into `%DSH_HOME%/embedded-niubash` and
+  runs commands via the project's `--ec` encoded-command handoff.
+- Settings: a "Built-in" picker group and a download/remove card; new routes
+  `GET /api/dsh-shell-switch/embedded`, `POST /embedded/install`,
+  `POST /embedded/remove`.
+- Config `embedded.{enabled,autoInstall,baseUrl}`.
+
+### Changed
+
+- A not-yet-installed embedded shell is never an automatic default
+  (`firstUsable`): it must be selected explicitly, and only after install.
+
 ## [0.3.0] — 2026-11-18
 
 ### Added
