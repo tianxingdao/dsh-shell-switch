@@ -28,6 +28,15 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { BackgroundSessions, DEFAULT_MAX_JOBS, DEFAULT_MAX_LOG_BYTES, DEFAULT_AUTO_CLEANUP_KEEP } from './background.js';
 import { buildBackgroundTools } from './background-tools.js';
+import {
+  assetFor as embeddedAssetFor,
+  embeddedInstalled,
+  installEmbedded,
+  removeEmbedded,
+  resolveEmbeddedExe,
+  embeddedRoot,
+  EMBEDDED_VERSION,
+} from './embedded.js';
 
 const API = '/api/dsh-shell-switch';
 const SETTINGS_FILE = 'shell-switch.json';
@@ -172,6 +181,21 @@ export const Config = z.object({
     autoCleanup: z.boolean().default(false),
     /** How many newest stopped jobs auto-cleanup keeps. */
     autoCleanupKeep: z.number().default(DEFAULT_AUTO_CLEANUP_KEEP),
+  }).default({}),
+  /**
+   * Embedded Niubash: ship a self-contained bash so a machine without one
+   * (Windows) is ready out of the box. On Linux/macOS a system bash already
+   * exists, so this is off by default there and the system bash is preferred.
+   * `autoInstall` downloads the pinned release on first need; `baseUrl` points
+   * at a mirror. Plain fields (no volatile nesting).
+   */
+  embedded: z.object({
+    /** Offer the embedded shell in the picker. Default: on Windows, off elsewhere. */
+    enabled: z.boolean().default(isWin),
+    /** Auto-download + extract the embedded bash when it is missing (Windows). */
+    autoInstall: z.boolean().default(true),
+    /** Release host override; defaults to the project's GitHub releases. */
+    baseUrl: z.string().default(''),
   }).default({}),
 });
 
@@ -706,6 +730,36 @@ function pathShells() {
 
 let discovery = { at: 0, shells: [] };
 
+/** Live embedded-Niubash options, set by `apply` from the row config. */
+let embeddedOptions = { enabled: isWin, autoInstall: true, baseUrl: '' };
+
+/**
+ * The embedded Niubash as a picker entry, or undefined when disabled / the
+ * platform has no build. A missing install still yields an entry (so the picker
+ * can offer to fetch it) when autoInstall is on; otherwise it is omitted.
+ * @returns {Record<string, unknown> | undefined} a shell entry.
+ */
+function embeddedShellEntry() {
+  if (embeddedOptions.enabled === false) return undefined;
+  const desc = embeddedAssetFor();
+  if (desc === undefined) return undefined;
+  const exe = resolveEmbeddedExe();
+  const installed = exe !== undefined;
+  if (!installed && embeddedOptions.autoInstall === false) return undefined;
+  return {
+    path: installed ? exe : path.join(embeddedRoot(), `<not-installed-${process.platform}-${process.arch}>`),
+    id: 'embedded-niu',
+    label: installed ? `内置 Niubash ${EMBEDDED_VERSION}` : `内置 Niubash（未安装，点「重新扫描」下载）`,
+    kind: 'bash',
+    dialect: 'niu',
+    embedded: true,
+    installed,
+    compatible: true,
+    source: 'embedded',
+    note: installed ? '自带' : '待下载',
+  };
+}
+
 /**
  * Detect every local shell, de-duplicated by real path.
  * @param {boolean} refresh - ignore the short-lived cache.
@@ -760,11 +814,18 @@ async function discoverShells(refresh = false) {
       version: '',
     });
   }
+  // The embedded Niubash is a plugin-provided shell (no registry/PATH file when
+  // it is the not-yet-downloaded placeholder), so it is spliced in directly
+  // rather than discovered. It is a bash dialect, so it sorts into tier 1.
+  const embedded = embeddedShellEntry();
+  if (embedded !== undefined && !shells.some((shell) => shell.id === 'embedded-niu')) {
+    shells.push({ ...embedded, version: '' });
+  }
   // Order: native bash on Windows first, then WSL distributions, then the rest;
   // within a tier, raw installs before linked/duplicated ones, then by label.
   // The first compatible entry is what `auto` picks, so this order decides the
   // default — a native bash (Git Bash, Niubash) beats a WSL launcher.
-  const tier = (shell) => (isPowerShell(shell) ? 3 : isWslLauncher(shell) ? 2 : 1);
+  const tier = (shell) => (shell.id === 'embedded-niu' ? 0 : isPowerShell(shell) ? 3 : isWslLauncher(shell) ? 2 : 1);
   // `usr\bin` is the real bash; `bin` is the shim Git for Windows puts first on
   // PATH. Prefer the real one when both resolve, so `auto` picks the same binary.
   const shim = (shell) => (/[\\/]bin[\\/]bash\.exe$/i.test(shell.path) && !/[\\/]usr[\\/]bin[\\/]/i.test(shell.path) ? 1 : 0);
@@ -919,6 +980,17 @@ function findByPath(shells, candidate, distro) {
  * @param {Array<Record<string, unknown>>} shells - detected shells.
  * @returns {{ shell: Record<string, unknown> | undefined, source: string, warning?: string }} the decision.
  */
+/**
+ * The first shell that is both compatible and actually usable right now: a
+ * not-yet-installed embedded Niubash is compatible in principle but cannot run,
+ * so it must never be an automatic default — only an explicit selection.
+ * @param {Array<Record<string, unknown>>} shells - detected shells.
+ * @returns {Record<string, unknown> | undefined} the first usable shell.
+ */
+function firstUsable(shells) {
+  return shells.find((shell) => shell.compatible && !(shell.id === 'embedded-niu' && shell.installed === false));
+}
+
 function resolveShell(config, shells) {
   const selected = readSelection();
   const configuredPath = String(valueOf(config.shellPath, '') ?? '');
@@ -927,7 +999,7 @@ function resolveShell(config, shells) {
     const hit = findByPath(shells, selected.path, selected.distro);
     if (hit !== undefined) return { shell: hit, source: 'selection' };
     return {
-      shell: shells.find((shell) => shell.compatible),
+      shell: firstUsable(shells),
       source: 'fallback',
       warning: `保存的 shell 已不存在：${selected.path}`,
     };
@@ -936,7 +1008,7 @@ function resolveShell(config, shells) {
     const hit = findByPath(shells, configuredPath);
     if (hit !== undefined) return { shell: hit, source: 'config' };
     return {
-      shell: shells.find((shell) => shell.compatible),
+      shell: firstUsable(shells),
       source: 'fallback',
       warning: `配置的 shellPath 不存在：${configuredPath}`,
     };
@@ -945,7 +1017,7 @@ function resolveShell(config, shells) {
     const hit = shells.find((shell) => shell.id === configuredId && shell.compatible);
     if (hit !== undefined) return { shell: hit, source: 'config' };
   }
-  return { shell: shells.find((shell) => shell.compatible), source: 'auto' };
+  return { shell: firstUsable(shells), source: 'auto' };
 }
 
 /**
@@ -1006,6 +1078,29 @@ function wslCommand(shellPath, command, workdir, distro) {
  */
 function isPowerShell(shell) {
   return shell?.dialect === 'powershell' || shell?.kind === 'powershell';
+}
+
+/**
+ * Is this the embedded Niubash launcher? It runs bash, but its argv is the
+ * encoded-command handoff `[niu, '--ec', base64]` instead of `-c`, which the
+ * project documents as the agent-safe way to pass a command through layers.
+ * @param {Record<string, unknown>} shell - the resolved shell.
+ * @returns {boolean} whether to use the `--ec` form.
+ */
+function isNiu(shell) {
+  return shell?.dialect === 'niu' || shell?.id === 'embedded-niu';
+}
+
+/**
+ * The argv for one command under the embedded Niubash: UTF-8 source, base64,
+ * passed as `--ec`. This has no quoting layer, so a command can contain any
+ * shell metacharacter or quote and arrive verbatim.
+ * @param {string} exePath - the niu launcher.
+ * @param {string} command - the bash command source.
+ * @returns {string[]} argv.
+ */
+function niuCommand(exePath, command) {
+  return [exePath, '--ec', Buffer.from(command, 'utf8').toString('base64')];
 }
 
 /**
@@ -1086,6 +1181,13 @@ async function resolveShellArgv(config, command, workdir) {
   }
   if (isWslLauncher(shell)) {
     return { argv: wslCommand(shell.path, command, cwd, shell.distro), cwd, shellLabel: shell.label };
+  }
+  if (isNiu(shell)) {
+    const exe = shell.installed === false ? undefined : resolveEmbeddedExe();
+    if (exe === undefined) {
+      throw new Error('内置 Niubash 尚未安装；请在 设置 → Shell 选择器 点「安装内置 bash」或「重新扫描」下载');
+    }
+    return { argv: niuCommand(exe, command), cwd, shellLabel: shell.label };
   }
   return { argv: [shell.path, '-c', command], cwd, shellLabel: shell.label };
 }
@@ -1172,6 +1274,12 @@ async function shellSwitchExecutor() {
       if (isPowerShell(shell)) return powershellCommand(shell, command, Boolean(this.config?.loadProfile?.get?.())).argv;
       if (isWslLauncher(shell)) {
         return wslCommand(shell.path, command, workdir ?? policy?.workspaceRoot ?? process.cwd(), shell.distro);
+      }
+      if (isNiu(shell)) {
+        // The executor only mounts the embedded shell once it is installed, so
+        // the launcher path resolves here; fall back to shell.path otherwise.
+        const exe = resolveEmbeddedExe() ?? shell.path;
+        return niuCommand(exe, command);
       }
       return [shell.path, '-c', command];
     }
@@ -1355,6 +1463,14 @@ async function statePayload(ctx, config, refresh, settle = false) {
     sandbox: policy ?? null,
     settingsFile: selectionFile(),
     defaults: { shell: String(valueOf(config.shell, DEFAULT_SHELL) ?? DEFAULT_SHELL) },
+    embedded: {
+      enabled: embeddedOptions.enabled !== false,
+      supported: embeddedAssetFor() !== undefined,
+      installed: embeddedInstalled(),
+      version: EMBEDDED_VERSION,
+      platform: process.platform,
+      arch: process.arch,
+    },
     pwsh: {
       hidden: isWin,
       restrictedAgents: diagnostics.restricted,
@@ -1378,6 +1494,34 @@ function registerRoutes(ctx, config) {
         if (!trusted(req)) return json(res, 403, { ok: false, error: 'forbidden' });
         const url = new URL(req.url ?? '/', 'http://localhost');
         const tail = url.pathname.slice(API.length) || '/';
+        if (req.method === 'GET' && tail === '/embedded') {
+          const desc = embeddedAssetFor();
+          return json(res, 200, {
+            ok: true,
+            supported: desc !== undefined,
+            enabled: embeddedOptions.enabled !== false,
+            installed: embeddedInstalled(),
+            version: EMBEDDED_VERSION,
+            asset: desc?.asset ?? null,
+            platform: process.platform,
+            arch: process.arch,
+            root: embeddedRoot(),
+            exe: resolveEmbeddedExe() ?? null,
+          });
+        }
+        if (req.method === 'POST' && tail === '/embedded/install') {
+          if (!String(req.headers['content-type'] ?? '').toLowerCase().includes('application/json')) {
+            return json(res, 415, { ok: false, error: 'content-type must be application/json' });
+          }
+          const result = await installEmbedded({ baseUrl: embeddedOptions.baseUrl || undefined, debug: (...p) => debug('embedded', ...p) });
+          if (result.ok) discovery = { at: 0, shells: [] };
+          return json(res, result.ok ? 200 : 500, result);
+        }
+        if (req.method === 'POST' && tail === '/embedded/remove') {
+          const result = removeEmbedded();
+          discovery = { at: 0, shells: [] };
+          return json(res, 200, result);
+        }
         if (req.method === 'GET' && (tail === '/' || tail === '/state')) {
           return json(res, 200, await statePayload(ctx, config, url.searchParams.get('refresh') === '1', url.searchParams.get('settle') === '1'));
         }
@@ -1736,6 +1880,30 @@ function detachAgent(agent) {
  * @param {Record<string, unknown>} config - the validated row config.
  */
 export function apply(ctx, config) {
+  // Capture the embedded-Niubash options and, on a platform that ships one,
+  // start a one-shot background install so the first visit finds it ready.
+  // (Windows is enabled by default; Linux/macOS default off — they have bash.)
+  {
+    const raw = valueOf(config?.embedded, undefined);
+    const inner = raw !== null && typeof raw === 'object' ? raw : {};
+    embeddedOptions = {
+      enabled: valueOf(inner.enabled, isWin) !== false,
+      autoInstall: valueOf(inner.autoInstall, true) !== false,
+      baseUrl: String(valueOf(inner.baseUrl, '') ?? ''),
+    };
+    const anyInstalled = embeddedInstalled();
+    if (embeddedOptions.enabled && embeddedOptions.autoInstall && !anyInstalled && embeddedAssetFor() !== undefined) {
+      const timer = setTimeout(() => {
+        void installEmbedded({ baseUrl: embeddedOptions.baseUrl || undefined, debug: (...p) => debug('embedded', ...p) })
+          .then((r) => {
+            if (r.ok) { discovery = { at: 0, shells: [] }; debug('embedded-installed', r.path ?? ''); }
+            else if (!r.skipped) debug('embedded-install-failed', r.error ?? '');
+          })
+          .catch(() => {});
+      }, 2500);
+      timer.unref?.();
+    }
+  }
   // Create the shared background manager once, before any Agent attaches so
   // their `bg_*` tools have a live sessions store to register against. It is
   // disposed (sweep timer only; jobs keep running) with this row's fiber.

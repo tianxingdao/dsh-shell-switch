@@ -44,7 +44,8 @@
     "icon.svg",
     "background.js",
     "background-tools.js",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "embedded.js"
   ],
   "dsh": {
     "bundle": {

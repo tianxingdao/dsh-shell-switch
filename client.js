@@ -37,6 +37,18 @@ window.__ModuleLoader__.load({
       settingsFile: 'Saved in',
       pwshHiddenNote: 'While this plugin is active, on Windows the shipped pwsh tool is hidden from every Agent; disable or remove the plugin to bring it back.',
       note: 'Note',
+      embGroup: 'Built-in',
+      embTitle: 'Built-in Niubash (bash)',
+      embStateInstalled: 'Installed',
+      embStateMissing: 'Not installed',
+      embExplain: 'A self-contained bash shipped by this plugin — no separate Niubash/Git Bash install needed. On Windows it is the ready-to-go option; on Linux/macOS your system bash already works, so this is optional.',
+      embInstall: 'Download built-in bash',
+      embRemove: 'Remove built-in bash',
+      embWorking: 'Working…',
+      embInstalled: 'Built-in bash installed',
+      embRemoved: 'Built-in bash removed',
+      embFailed: 'Built-in bash action failed',
+      embNotInstalled: 'not installed',
       // Background jobs tab (better-sidebar).
       bgNav: 'Background jobs',
       bgDescription: 'Detached background processes started with bg_start — they keep running after the tool call and the harness restart.',
@@ -118,6 +130,18 @@ window.__ModuleLoader__.load({
       settingsFile: '保存位置',
       pwshHiddenNote: '本插件启用期间，如果是 Windows 环境，官方 pwsh 工具对所有 Agent 隐藏；停用或卸载本插件即可恢复。',
       note: '说明',
+      embGroup: '内置',
+      embTitle: '内置 Niubash（bash）',
+      embStateInstalled: '已安装',
+      embStateMissing: '未安装',
+      embExplain: '本插件自带的 bash，无需另装 Niubash / Git Bash。Windows 上开箱即用；Linux/macOS 系统已有 bash，此项为可选项。',
+      embInstall: '下载内置 bash',
+      embRemove: '移除内置 bash',
+      embWorking: '处理中…',
+      embInstalled: '内置 bash 已安装',
+      embRemoved: '内置 bash 已移除',
+      embFailed: '内置 bash 操作失败',
+      embNotInstalled: '未安装',
       // 后台任务 tab（better-sidebar）。
       bgNav: '后台任务',
       bgDescription: '由 bg_start 启动的分离后台进程，工具调用结束后仍继续运行（重启 harness 也不受影响）。',
@@ -276,6 +300,32 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState(false);
       const [message, setMessage] = React.useState(null);
       const [error, setError] = React.useState(null);
+      const [embBusy, setEmbBusy] = React.useState(false);
+      const [embMsg, setEmbMsg] = React.useState(null);
+
+      /** Install or remove the embedded Niubash, then refresh the shell list. */
+      const embeddedAction = async (action) => {
+        setEmbBusy(true);
+        setError(null);
+        setEmbMsg(null);
+        try {
+          const res = await request(`/embedded/${action}`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({}),
+          });
+          if (action === 'install') {
+            setEmbMsg(res.ok ? `${t('embInstalled')}${res.path ? `：${res.path}` : ''}` : `${t('embFailed')}：${res.error ?? ''}`);
+          } else {
+            setEmbMsg(t('embRemoved'));
+          }
+          await load(true);
+        } catch (failure) {
+          setEmbMsg(`${t('embFailed')}：${failure.message}`);
+        } finally {
+          setEmbBusy(false);
+        }
+      };
 
       const load = React.useCallback(async (force, settle) => {
         setBusy(true);
@@ -349,13 +399,22 @@ window.__ModuleLoader__.load({
 
       const shells = Array.isArray(state.shells) ? state.shells : [];
       const isPs = (shell) => shell.dialect === 'powershell' || shell.kind === 'powershell';
-      const compatible = shells.filter((shell) => shell.compatible === true && !isPs(shell));
+      const isEmbedded = (shell) => shell.id === 'embedded-niu' || shell.source === 'embedded';
+      const embedded = shells.find(isEmbedded) ?? null;
+      const compatible = shells.filter((shell) => shell.compatible === true && !isPs(shell) && !isEmbedded(shell));
       const powershell = shells.filter((shell) => shell.compatible === true && isPs(shell));
       const others = shells.filter((shell) => shell.compatible !== true);
       const currentValue = optionValue(state.selected ?? {});
       const dirty = draft !== currentValue;
 
       const groups = [];
+      // The embedded Niubash gets its own group at the top so it reads as the
+      // plugin-provided, ready-to-go option rather than another local shell.
+      if (embedded !== null) {
+        groups.push(h('optgroup', { key: 'embedded', label: t('embGroup') },
+          h('option', { key: embedded.path, value: optionValue(embedded), disabled: embedded.installed === false },
+            `${embedded.label}${embedded.version ? ` · ${embedded.version}` : ''}${embedded.installed === false ? `（${t('embNotInstalled')}）` : ''}`)));
+      }
       if (compatible.length > 0) groups.push(h('optgroup', { key: 'compatible', label: t('compatible') },
         compatible.map((shell) => h('option', { key: shell.path, value: optionValue(shell) },
           `${shell.label}${shell.version ? ` · ${shell.version}` : ''}${shell.note ? ` — ${shell.note}` : ''}`))));
@@ -367,6 +426,7 @@ window.__ModuleLoader__.load({
           `${shell.label}（${t('incompatible')}）`))));
 
       const selectedShell = shells.find((shell) => optionValue(shell) === currentValue) ?? null;
+      const embInfo = state.embedded ?? null;
 
       return h('div', { style: styles.page },
         h('h2', { style: styles.title }, t('title')),
@@ -386,6 +446,21 @@ window.__ModuleLoader__.load({
           h('button', { type: 'button', style: styles.button, disabled: busy, onClick: () => load(false, true) }, t('refresh'))),
         message !== null ? h('p', { style: styles.message }, message) : null,
         error !== null ? h('p', { style: styles.error }, error) : null,
+        // Embedded Niubash status + install/remove.
+        embInfo !== null && embInfo.supported === true
+          ? h('div', { style: styles.card },
+            h('strong', { style: styles.label }, t('embTitle')),
+            h('p', { style: styles.hint },
+              embInfo.installed === true
+                ? `${t('embStateInstalled')} · v${embInfo.version}`
+                : `${t('embStateMissing')} · v${embInfo.version}`),
+            h('p', { style: styles.hint }, t('embExplain')),
+            h('div', { style: styles.row },
+              embInfo.installed === true
+                ? h('button', { type: 'button', style: styles.button, disabled: embBusy, onClick: () => embeddedAction('remove') }, embBusy ? t('embWorking') : t('embRemove'))
+                : h('button', { type: 'button', style: styles.primary, disabled: embBusy, onClick: () => embeddedAction('install') }, embBusy ? t('embWorking') : t('embInstall'))),
+            embMsg !== null ? h('p', { style: styles.message }, embMsg) : null)
+          : null,
         state.effective !== null
           ? h('div', { style: styles.card },
             h('strong', { style: styles.label }, t('effective')),
