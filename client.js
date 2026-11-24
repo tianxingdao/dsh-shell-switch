@@ -37,8 +37,7 @@ window.__ModuleLoader__.load({
       settingsFile: 'Saved in',
       pwshHiddenNote: 'While this plugin is active, on Windows the shipped pwsh tool is hidden from every Agent; disable or remove the plugin to bring it back.',
       note: 'Note',
-      embGroup: 'Built-in',
-      niubashGroup: 'Niubash (installed)',
+      embGroup: 'Built-in bash (bundled)',
       embTitle: 'Built-in Niubash (bash)',
       embStateInstalled: 'Installed',
       embStateMissing: 'Not installed',
@@ -131,8 +130,7 @@ window.__ModuleLoader__.load({
       settingsFile: '保存位置',
       pwshHiddenNote: '本插件启用期间，如果是 Windows 环境，官方 pwsh 工具对所有 Agent 隐藏；停用或卸载本插件即可恢复。',
       note: '说明',
-      embGroup: '内置',
-      niubashGroup: 'Niubash（已安装）',
+      embGroup: '内置 bash（插件自带）',
       embTitle: '内置 Niubash（bash）',
       embStateInstalled: '已安装',
       embStateMissing: '未安装',
@@ -402,10 +400,11 @@ window.__ModuleLoader__.load({
       const shells = Array.isArray(state.shells) ? state.shells : [];
       const isPs = (shell) => shell.dialect === 'powershell' || shell.kind === 'powershell';
       const isEmbedded = (shell) => shell.id === 'embedded-niu' || shell.source === 'embedded';
-      const isNiubash = (shell) => !isEmbedded(shell) && shell.id === 'niubash';
       const embedded = shells.find(isEmbedded) ?? null;
-      const niubash = shells.filter((shell) => shell.compatible === true && isNiubash(shell));
-      const compatible = shells.filter((shell) => shell.compatible === true && !isPs(shell) && !isEmbedded(shell) && !isNiubash(shell));
+      // A locally-installed Niubash stays a normal bash-family shell and lives
+      // in the generic "can runs bash" group — only the plugin's OWN embedded
+      // bash gets a separate group.
+      const compatible = shells.filter((shell) => shell.compatible === true && !isPs(shell) && !isEmbedded(shell));
       const powershell = shells.filter((shell) => shell.compatible === true && isPs(shell));
       const others = shells.filter((shell) => shell.compatible !== true);
       const currentValue = optionValue(state.selected ?? {});
@@ -419,12 +418,6 @@ window.__ModuleLoader__.load({
           h('option', { key: embedded.path, value: optionValue(embedded), disabled: embedded.installed === false },
             `${embedded.label}${embedded.version ? ` · ${embedded.version}` : ''}${embedded.installed === false ? `（${t('embNotInstalled')}）` : ''}`)));
       }
-      // A locally-installed Niubash is its own group too, kept apart from the
-      // generic bash group and from the embedded one; each version is its own
-      // option (different install paths are not collapsed).
-      if (niubash.length > 0) groups.push(h('optgroup', { key: 'niubash', label: t('niubashGroup') },
-        niubash.map((shell) => h('option', { key: shell.path, value: optionValue(shell) },
-          `${shell.label}${shell.version ? ` · ${shell.version}` : ''}${shell.note ? ` — ${shell.note}` : ''}`))));
       if (compatible.length > 0) groups.push(h('optgroup', { key: 'compatible', label: t('compatible') },
         compatible.map((shell) => h('option', { key: shell.path, value: optionValue(shell) },
           `${shell.label}${shell.version ? ` · ${shell.version}` : ''}${shell.note ? ` — ${shell.note}` : ''}`))));
