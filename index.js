@@ -611,7 +611,10 @@ function knownShells() {
   // go through `wsl -d <name> -e bash` and need the same translation.
   const distros = wslDistros();
   if (distros.length === 0) {
-    add(path.join(winRoot, 'System32', 'bash.exe'), {
+    // Launch via `wsl.exe`, NOT `System32\bash.exe`: the legacy bash.exe
+    // launcher hardcodes /bin/bash, which does not exist on usrmerge distros
+    // (Ubuntu 24.04+ where /bin is a symlink) and fails with execvpe(/bin/bash).
+    add(path.join(winRoot, 'System32', 'wsl.exe'), {
       id: 'wsl',
       label: 'WSL bash',
       kind: 'bash',
@@ -621,7 +624,7 @@ function knownShells() {
     });
   } else {
     for (const distro of distros) {
-      add(path.join(winRoot, 'System32', 'bash.exe'), {
+      add(path.join(winRoot, 'System32', 'wsl.exe'), {
         id: 'wsl',
         distro: distro.name,
         label:
@@ -1036,7 +1039,7 @@ function resolveShell(config, shells) {
 function isWslLauncher(shell) {
   if (shell?.id === 'wsl') return true;
   const resolved = String(shell?.path ?? '').replace(/\\/g, '/').toLowerCase();
-  return /\/windows\/system32\/bash\.exe$/.test(resolved);
+  return /\/windows\/system32\/bash\.exe$/.test(resolved) || /\/windows\/system32\/wsl\.exe$/.test(resolved);
 }
 
 /**
@@ -1072,7 +1075,11 @@ function wslCommand(shellPath, command, workdir, distro) {
   );
   const cd = `cd ${JSON.stringify(toWslPath(workdir))} 2>/dev/null || cd ~`;
   const target = typeof distro === 'string' && distro.length > 0 ? ['-d', distro] : [];
-  return [shellPath, ...target, '-l', '-c', `${cd} && ${translated}`];
+  // Run the distro's bash explicitly as a login shell: `bash -lc <cmd>`.
+  // Do NOT pass `-l` to the WSL launcher itself — `wsl.exe -l` means "list
+  // distributions" and rejects `-c` with E_INVALIDARG. The `-l/-c` flags belong
+  // to bash inside the distro, so they go after `bash`.
+  return [shellPath, ...target, 'bash', '-lc', `${cd} && ${translated}`];
 }
 
 /**
