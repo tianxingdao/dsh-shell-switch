@@ -860,6 +860,10 @@ async function discoverShells(refresh = false) {
   const unique = [];
   const seenKey = new Set();
   for (const shell of shells) {
+    // The embedded Niubash is plugin-provided and must NEVER be merged with a
+    // locally-installed Niubash (different binary, different version). It is
+    // kept verbatim by the dedupe below and only its own entry survives.
+    if (shell.id === 'embedded-niu') { unique.push(shell); continue; }
     // Non-bash rows keep their own identity so e.g. `winuxsh.exe` next to the
     // bash entries of the same install is not swallowed.
     const key = shell.compatible ? installKey(shell) : shell.path.toLowerCase();
