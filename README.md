@@ -163,6 +163,7 @@ bash: {
 插件可以**自带一份 bash**，让机器上没装任何 bash 也能开箱即用：
 
 - **Windows：默认开启**——系统本身没有 bash，内置的 Niubash 就是"开箱即用"的首选项。首次按 `process.platform`/`arch` 从官方 release 下载对应包（win-x64 / win-arm64），解压到 `%DSH_HOME%/embedded-niubash/v<版本>/`；选择器顶部多一个「内置」分组，选中即可用。
+- **首次默认内置、之后自由切换**：全新安装（尚未保存过任何选择）且内置已下载完成时，`auto` 会自动选用内置 Niubash，开箱即用；一旦你在选择器里手动选了别的 shell 并保存，之后就一直用你的选择（插件不会覆盖）。内置尚未下载完之前，`auto` 会先用系统里现成的 bash。
 - **Linux / macOS：默认不启用**——系统已有 bash，内置只是可选项（默认隐藏，可在配置 `embedded.enabled: true` 打开）。
 - **命令通道**：内置 Niubash 走官方 `--ec <base64>`（`-EncodedCommand` 的 bash 版），命令原样传递、天然免引号穿透；退出码、UTF-8 输出与普通 bash 一致。
 - **安装/移除**：设置页「Shell 选择器」里有「内置 Niubash」卡片——未安装时显示「下载内置 bash」，已安装时显示「移除内置 bash」。`embedded.autoInstall` 为真时首启也会在后台自动下载。

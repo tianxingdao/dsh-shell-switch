@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [0.4.0] — 2026-11-23
+## [0.4.0] — 2026-11-24
 
 ### Added
 
@@ -14,8 +14,11 @@ All notable changes to this project are documented here. The format follows
   selectable. It downloads the official Niubash (MIT) release for the current
   platform (win/linux/macos × x64/arm64) into `%DSH_HOME%/embedded-niubash` and
   runs commands via the project's `--ec` encoded-command handoff.
-- Settings: a "Built-in" picker group and a download/remove card; new routes
-  `GET /api/dsh-shell-switch/embedded`, `POST /embedded/install`,
+- **First-run default**: with no saved choice and the embedded bash installed,
+  `auto` picks the embedded Niubash (ready out of the box); once you pick any
+  shell and save, your choice wins and is never overridden.
+- Settings: a "Built-in bash (bundled)" picker group and a download/remove card;
+  new routes `GET /api/dsh-shell-switch/embedded`, `POST /embedded/install`,
   `POST /embedded/remove`.
 - Config `embedded.{enabled,autoInstall,baseUrl}`.
 
@@ -23,6 +26,16 @@ All notable changes to this project are documented here. The format follows
 
 - A not-yet-installed embedded shell is never an automatic default
   (`firstUsable`): it must be selected explicitly, and only after install.
+- The picker gives the embedded bash its own group; a locally-installed Niubash
+  stays in the normal "can run bash" group alongside Git Bash / WSL.
+
+### Fixed
+
+- **WSL now works on modern distros**: the plugin launched WSL via the legacy
+  `System32\bash.exe`, which hardcodes `/bin/bash` and fails on usrmerge distros
+  (Ubuntu 24.04+) with `execvpe(/bin/bash): No such file or directory`. WSL
+  entries now run through `System32\wsl.exe` as `wsl -d <distro> bash -lc <cmd>`.
+  Verified on Ubuntu 24.04.
 
 ## [0.3.0] — 2026-11-18
 
