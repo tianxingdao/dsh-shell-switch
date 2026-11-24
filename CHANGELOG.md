@@ -4,7 +4,10 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [0.4.0] — 2026-11-24
+## [0.4.1] — 2026-11-24
+
+First public release of the embedded-bash feature. (0.4.0 was withdrawn before
+publication and its version number is retired, so this ships as 0.4.1.)
 
 ### Added
 
