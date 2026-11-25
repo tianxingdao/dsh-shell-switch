@@ -72,6 +72,196 @@ function pidAlive(pid) {
   }
 }
 
+/**
+ * Translate a Windows path to its WSL mount form (`C:\a` → `/mnt/c/a`). A
+ * non-drive path is returned unchanged.
+ * @param {string} value - a Windows path.
+ * @returns {string} the WSL path.
+ */
+function toWslPath(value) {
+  const match = /^([A-Za-z]):[\\/](.*)$/.exec(String(value));
+  if (match === null) return String(value);
+  return `/mnt/${match[1].toLowerCase()}/${match[2].replace(/\\/g, '/')}`;
+}
+
+/** Cached default WSL distribution name (resolved via `wsl -l -v`). */
+let cachedWslDistro;
+/**
+ * Resolve a usable WSL distribution name for launching a background job.
+ *
+ * A background WSL command MUST run as `<wsl.exe> -d <distro> bash <file>`;
+ * without `-d`, `wsl bash file` falls into a `/bin/sh` with no `bash` (exit
+ * 127). We list distributions and pick the first non-utility one (skipping the
+ * `docker-desktop` VM), preferring a `Default`/running one when known.
+ * @param {string} [launcher] - the wsl.exe path.
+ * @returns {string | undefined} a distro name, or undefined if none found.
+ */
+function defaultWslDistro(launcher) {
+  if (cachedWslDistro !== undefined) return cachedWslDistro;
+  const exe = typeof launcher === 'string' && launcher.length > 0 ? launcher : 'wsl.exe';
+  try {
+    const raw = execFileSync(exe, ['-l', '-q'], {
+      encoding: 'buffer', windowsHide: true, timeout: 5000, maxBuffer: 1024 * 1024,
+    });
+    const text = raw.includes(0) ? raw.toString('utf16le') : raw.toString('utf8');
+    const names = text.split(/\r?\n/).map((s) => s.replace(/\u0000/g, '').trim()).filter(Boolean)
+      .filter((n) => !/^docker-desktop/i.test(n));
+    cachedWslDistro = names[0];
+  } catch {
+    cachedWslDistro = undefined;
+    return undefined;
+  }
+  return cachedWslDistro;
+}
+
+/**
+ * Build an argv whose command source redirects its own stdout/stderr to the
+ * log file, for shells that do not write to an inherited, detached file handle
+ * (WSL, PowerShell, some Git Bash builds). The command source is always the
+ * last argv element; we rewrite only that.
+ * @param {string[]} argv - the original argv from the shell resolver.
+ * @param {string} logPath - absolute log-file path (Windows form).
+ * @param {string} [dialect] - 'bash' | 'wsl' | 'powershell' | undefined.
+ * @returns {string[]} a new argv with self-redirection appended.
+ */
+function buildSelfRedirectArgv(argv, logPath, dialect) {
+  const out = [...argv];
+  const cmd = out[out.length - 1] ?? '';
+  if (dialect === 'powershell') {
+    // PowerShell: redirect all streams to the file, ASCII/UTF8 append.
+    // `*>` sends every stream; wrap the whole original source in a scriptblock
+    // so the redirect applies to the script's output.
+    out[out.length - 1] = `& { ${cmd} } *> ${psQuote(logPath)}`;
+  } else if (dialect === 'wsl') {
+    // Path lives on the Windows side; the distro sees it under /mnt/<drive>.
+    const wslLog = toWslPath(logPath);
+    out[out.length - 1] = `{ ${cmd} ; } > ${bashQuote(wslLog)} 2>&1`;
+  } else {
+    // bash-family on Windows (Git Bash, MSYS2, Niu): write to the Windows path.
+    // Git Bash understands Windows paths when quoted; use the posix form to be safe.
+    const posix = String(logPath).replace(/\\/g, '/');
+    out[out.length - 1] = `{ ${cmd} ; } > ${bashQuote(posix)} 2>&1`;
+  }
+  return out;
+}
+
+/** Single-quote a path for a POSIX shell. */
+function bashQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+/** Single-quote a path for PowerShell (escape internal single quotes). */
+function psQuote(value) {
+  return `'${String(value).replace(/'/g, `''`)}'`;
+}
+
+/**
+ * Build the argv for a file-based WSL background job.
+ *
+ * Passing a long command as a `-lc "<cmd>"` argument to `wsl.exe` mangles shell
+ * metacharacters (`$i`, `$(...)`, `$((...))` get eaten by wsl.exe's own arg
+ * handling), which silently breaks loops/vars. So instead we write the command
+ * to a `.sh` file (with the `cd` prelude baked in) and run `wsl -d <distro>
+ * bash <file>`, which preserves everything verbatim. The script redirects its
+ * own output to the log.
+ * @param {object} opts - options.
+ * @param {string} opts.launcher - wsl.exe path.
+ * @param {string} [opts.distro] - distribution name (optional).
+ * @param {string} opts.command - the raw bash command.
+ * @param {string} opts.cwd - the Windows working directory.
+ * @param {string} opts.logPath - the Windows log path.
+ * @param {string} opts.scriptPath - where to write the .sh (Windows path).
+ * @returns {string[]} argv for wsl.exe.
+ */
+function wslFileArgv(opts) {
+  // `wsl.exe` REQUIRES `-d <distro>` here: without it, `wsl bash script.sh`
+  // runs under a `/bin/sh` that has no `bash` (exit 127 "/bin/sh: bash: not
+  // found"), and `-e bash` also fails on a default distro whose bash path
+  // differs. So resolve a distro if the caller did not supply one.
+  let distro = opts.distro;
+  if (!(typeof distro === 'string' && distro.length > 0)) {
+    distro = defaultWslDistro(opts.launcher);
+  }
+  // Translate the script body ...
+  const translated = String(opts.command).replace(
+    /(^|[^\w:])([A-Za-z]):[\\/]([^\s'"`;|&<>()]*)/g,
+    (_m, prefix, drive, rest) => `${prefix}/mnt/${drive.toLowerCase()}/${rest.replace(/\\/g, '/')}`,
+  );
+  const cd = `cd ${bashQuote(toWslPath(opts.cwd))} 2>/dev/null || cd ~`;
+  const logWsl = toWslPath(opts.logPath);
+  const body = `#!/usr/bin/env bash\n${cd}\n{\n${translated}\n} > ${bashQuote(logWsl)} 2>&1\n`;
+  fs.writeFileSync(opts.scriptPath, body, 'utf8');
+  const scriptWsl = toWslPath(opts.scriptPath);
+  const target = typeof distro === 'string' && distro.length > 0 ? ['-d', distro] : [];
+  return [opts.launcher, ...target, 'bash', scriptWsl];
+}
+
+/**
+ * Split a PowerShell argv into its executable and the static flags before
+ * `-Command`. The `-Command <bootstrap>` pair is dropped because the detached
+ * launcher runs the raw command from a `.ps1` file instead.
+ * @param {string[]} argv - `[exe, ...flags, '-Command', bootstrap]`.
+ * @returns {{ psExe: string, psFlags: string[] }} the executable and flags.
+ */
+function splitPowerShellArgv(argv) {
+  const psExe = argv[0];
+  const cmdIndex = argv.indexOf('-Command');
+  const psFlags = cmdIndex === -1 ? argv.slice(1) : argv.slice(1, cmdIndex);
+  return { psExe, psFlags };
+}
+
+/**
+ * Launch a PowerShell command as a genuinely detached process that actually
+ * runs and writes its output to `logPath`.
+ *
+ * On Windows `spawn(pwsh, ..., {detached:true})` exits immediately without
+ * running the command (no console host), including the Store alias `pwsh.exe`.
+ * `cmd /c start "" /b <launcher.cmd>` detaches into an independent process that
+ * keeps a console context. We write the raw command to a `.ps1`, and a `.cmd`
+ * launcher that runs it with `> log 2>&1`, then start that launcher detached.
+ * @param {object} opts - launch options.
+ * @param {string} opts.exe - the PowerShell executable.
+ * @param {string[]} opts.flags - static flags (`-NoLogo`, `-NoProfile`, …).
+ * @param {string} opts.command - the raw PowerShell command source.
+ * @param {string} opts.logPath - log file path.
+ * @param {string} opts.cwd - working directory.
+ * @param {object} opts.env - environment.
+ * @returns {import('node:child_process').ChildProcess} the launcher process.
+ */
+function launchPowerShellDetached(opts) {
+  const id = path.basename(opts.logPath).replace(/\.log$/, '');
+  const dir = path.dirname(opts.logPath);
+  const ps1 = path.join(dir, `${id}.ps1`);
+  const bat = path.join(dir, `${id}.cmd`);
+  const pidFile = path.join(dir, `${id}.pid`);
+  // Force UTF-8 output so CJK / unicode lines round-trip into the log cleanly,
+  // and record the real PowerShell PID (the launcher cmd's PID dies instantly,
+  // so the job must track this one instead).
+  const prelude = '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; $OutputEncoding=[System.Text.Encoding]::UTF8;';
+  const pidLine = `$PID | Out-File -FilePath ${psQuote(pidFile)} -Encoding ascii -Force`;
+  fs.writeFileSync(ps1, `${prelude}\n${pidLine}\n${opts.command}\n`, 'utf8');
+  const flags = (opts.flags ?? []).join(' ');
+  // Batch: run pwsh -File <ps1>, redirecting both streams to the log. `chcp 65001`
+  // so the console code page matches UTF-8.
+  const lines = [
+    '@echo off',
+    'chcp 65001 >nul 2>&1',
+    `"${opts.exe}" ${flags} -ExecutionPolicy Bypass -File "${ps1}" > "${opts.logPath}" 2>&1`,
+  ];
+  fs.writeFileSync(bat, lines.join('\r\n') + '\r\n', 'utf8');
+  // `start "" /b <bat>` detaches the batch into its own independent process.
+  const launcher = spawn('cmd.exe', ['/c', 'start', '', '/b', bat], {
+    cwd: opts.cwd,
+    env: opts.env,
+    detached: true,
+    windowsHide: true,
+    stdio: 'ignore',
+  });
+  // The real PowerShell process is a grandchild; resolve its PID from the pid
+  // file shortly after launch and hand it back via a callback.
+  return { launcher, pidFile, resolvePid: opts.resolvePid };
+}
+
 /** Read one log file's tail from `offset`, capped at `limit` bytes. */
 function readLogAt(file, offset, limit) {
   let stat;
@@ -284,27 +474,97 @@ export class BackgroundSessions {
     this.ensureDir();
     const id = mintId();
     const logPath = path.join(jobsDir(), `${id}.log`);
-    const out = fs.openSync(logPath, 'a');
+    // Decide how the child's stdout/stderr reach the log file.
+    //
+    // Only the bundled Niubash reliably writes to an inherited file handle when
+    // spawned detached and windowless. Git Bash (Scoop) loses its coreutils
+    // PATH, and WSL/PowerShell simply do not write to a redirected inherited
+    // handle without a console — their output never lands in the log. So for
+    // those shells we let the SHELL open the log itself via `> log 2>&1`
+    // (self-redirection), and hand it a throwaway stdout. `selfRedirect` is set
+    // by the caller from the resolved shell dialect.
+    const selfRedirect = input.selfRedirect === true;
+    let spawnArgv = input.argv;
+    let spawnEnv = { ...process.env };
+    // Extra PATH dirs (e.g. Git Bash's usr/bin + mingw64/bin) so a detached
+    // Git Bash still finds its own coreutils (`sleep`, `ls`, `date`, …).
+    if (Array.isArray(input.extraPath) && input.extraPath.length > 0) {
+      const current = spawnEnv.PATH ?? spawnEnv.Path ?? '';
+      spawnEnv.PATH = `${input.extraPath.join(path.delimiter)}${current ? path.delimiter + current : ''}`;
+      spawnEnv.Path = spawnEnv.PATH;
+    }
+
+    // PowerShell does not run its `-Command` when spawned `detached` and
+    // windowless from Node on Windows (it exits 0 without producing output, and
+    // the App-Execution-Alias `pwsh.exe` is even worse). The reliable detach is
+    // `cmd /c start "" /b <launcher>`: `start` creates an independent process
+    // that keeps a console context. We drop the raw PowerShell source into a
+    // .ps1 and a .cmd launcher that runs it with `> log 2>&1`, then launch via
+    // `start /b` and detach THAT.
+    const isPowerShellDialect = input.shellDialect === 'powershell' || input.dialect === 'powershell';
+    // Detect a WSL launch from the argv itself (self-sufficient, independent of
+    // what the resolver passed): argv[0] is wsl.exe / System32\bash.exe. Pull
+    // the distro from a `-d <name>` pair if present.
+    const wslLauncherArg = String(input.argv?.[0] ?? '');
+    const normLower = wslLauncherArg.replace(/\//g, '\\').toLowerCase();
+    // Only the WSL launchers count: System32\wsl.exe or System32\bash.exe. A
+    // normal Git Bash/ MSYS `...\usr\bin\bash.exe` must NOT be treated as WSL.
+    const looksWsl = /\\windows\\system32\\(?:wsl|bash)\.exe$/.test(normLower)
+      || input.shellDialect === 'wsl' || input.dialect === 'wsl';
+    let wslDistroArg = input.wslDistro;
+    if (wslDistroArg === undefined) {
+      const di = input.argv.indexOf('-d');
+      if (di !== -1 && di + 1 < input.argv.length) wslDistroArg = input.argv[di + 1];
+    }
+    const isWslDialect = looksWsl && typeof wslLauncherArg === 'string';
     let child;
+    let psLaunch;
+    const out = isPowerShellDialect || isWslDialect || selfRedirect ? undefined : fs.openSync(logPath, 'a');
     try {
-      // windowsHide keeps a console from flashing; detached puts the child in
-      // its own process group so closing the parent (or the harness) leaves it
-      // running; stdio[1]/[2] share the log fd so stdout and stderr interleave
-      // in one stream, exactly what a terminal user expects.
-      child = spawn(input.argv[0], input.argv.slice(1), {
-        cwd: input.cwd,
-        env: { ...process.env },
-        detached: true,
-        windowsHide: true,
-        stdio: ['ignore', out, out],
-      });
+      if (isPowerShellDialect) {
+        const { psExe, psFlags } = splitPowerShellArgv(input.argv);
+        psLaunch = launchPowerShellDetached({ exe: psExe, flags: psFlags, command: input.command, logPath, cwd: input.cwd, env: spawnEnv });
+        child = psLaunch.launcher;
+      } else if (isWslDialect) {
+        // File-based WSL: wsl.exe mangles `$`/metacharacters in a `-lc` arg, so
+        // run a written .sh instead; it redirects its own output to the log.
+        const scriptPath = path.join(path.dirname(logPath), `${id}.sh`);
+        const wslArgv = wslFileArgv({ launcher: wslLauncherArg, distro: wslDistroArg, command: input.command, cwd: input.cwd, logPath, scriptPath });
+        child = spawn(wslArgv[0], wslArgv.slice(1), {
+          cwd: input.cwd,
+          env: spawnEnv,
+          detached: true,
+          windowsHide: true,
+          stdio: ['ignore', 'ignore', 'ignore'],
+        });
+      } else {
+        if (selfRedirect) {
+          // Replace the final (command) argument with one that redirects its own
+          // output to the log file. argv shapes: bash `[exe,-c,cmd]` — the
+          // command source is the last element.
+          spawnArgv = buildSelfRedirectArgv(input.argv, logPath, input.shellDialect);
+        }
+        // windowsHide keeps a console from flashing; detached puts the child in
+        // its own process group so closing the parent (or the harness) leaves it
+        // running; stdio[1]/[2] share the log fd so stdout and stderr interleave
+        // in one stream, exactly what a terminal user expects.
+        child = spawn(spawnArgv[0], spawnArgv.slice(1), {
+          cwd: input.cwd,
+          env: spawnEnv,
+          detached: true,
+          windowsHide: true,
+          stdio: selfRedirect ? ['ignore', 'ignore', 'ignore'] : ['ignore', out, out],
+        });
+      }
     } finally {
       // The child holds its own duplicate of the fd; the parent's copy must be
       // closed or the log stays locked on Windows.
-      try {
-        fs.closeSync(out);
-      } catch {
-        // ignore
+      if (out !== undefined) {
+        try {
+          fs.closeSync(out);
+        } catch {
+          // ignore
+        }
       }
     }
     const record = {
@@ -326,7 +586,33 @@ export class BackgroundSessions {
       status: child.pid === undefined ? 'failed' : 'running',
       bytes: 0,
       error: undefined,
+      pidPending: isPowerShellDialect === true,
     };
+    this.jobs.set(id, record);
+    this.save();
+    // PowerShell: the launcher cmd's PID dies immediately; the real pwsh is a
+    // grandchild. Poll the pid file it writes and adopt that PID so the
+    // liveness sweep and kill target the right process.
+    if (isPowerShellDialect && psLaunch) {
+      const adopt = (attempt) => {
+        let real;
+        try { real = Number.parseInt(fs.readFileSync(psLaunch.pidFile, 'utf8').trim(), 10); } catch { real = NaN; }
+        if (Number.isInteger(real) && real > 0) {
+          const job = this.jobs.get(id);
+          if (job !== undefined && job.pid !== real) {
+            job.pid = real;
+            job.pidPending = false;
+            this.save();
+          } else if (job !== undefined) {
+            job.pidPending = false;
+          }
+          return;
+        }
+        if (attempt < 40 /* ~10s */) setTimeout(() => adopt(attempt + 1), 250).unref?.();
+        // If the log already has bytes, the job ran even if we couldn't read a PID.
+      };
+      setTimeout(() => adopt(0), 200).unref?.();
+    }
     child.on('error', (error) => {
       const job = this.jobs.get(id);
       if (job === undefined) return;
@@ -335,26 +621,30 @@ export class BackgroundSessions {
       job.endedAt = Date.now();
       this.save();
     });
-    child.on('exit', (code, signal) => {
-      const job = this.jobs.get(id);
-      if (job === undefined) return;
-      // Preserve a kill: whether the status is still `stopping` or was already
-      // flipped to `killed` synchronously by kill(), the terminal reason is the
-      // same. Only a job that ran to completion becomes `exited`.
-      if (job.status === 'stopping' || job.status === 'killed') {
-        job.status = 'killed';
-      } else {
-        job.status = 'exited';
-      }
-      job.exitCode = code;
-      job.signal = signal;
-      job.endedAt = job.endedAt ?? Date.now();
-      this.save();
-    });
+    // For PowerShell the launcher cmd exits almost immediately with 0 — that is
+    // NOT the job ending (the real pwsh keeps running). So we never mark a
+    // PowerShell job `exited` from the launcher's exit; the liveness sweep
+    // (which checks the adopted pid) owns its terminal state.
+    if (!isPowerShellDialect) {
+      child.on('exit', (code, signal) => {
+        const job = this.jobs.get(id);
+        if (job === undefined) return;
+        // Preserve a kill: whether the status is still `stopping` or was already
+        // flipped to `killed` synchronously by kill(), the terminal reason is the
+        // same. Only a job that ran to completion becomes `exited`.
+        if (job.status === 'stopping' || job.status === 'killed') {
+          job.status = 'killed';
+        } else {
+          job.status = 'exited';
+        }
+        job.exitCode = code;
+        job.signal = signal;
+        job.endedAt = job.endedAt ?? Date.now();
+        this.save();
+      });
+    }
     // The child is unreferenced so the harness can exit without waiting for it.
     child.unref();
-    this.jobs.set(id, record);
-    this.save();
     this.ensureSweep();
     return this.public(record);
   }
@@ -372,6 +662,17 @@ export class BackgroundSessions {
             job.bytes = fs.statSync(job.logPath).size;
           } catch {
             // ignore
+          }
+          // A PowerShell job's starting `pid` is the launcher cmd (dead at once)
+          // until the real pwsh pid is adopted from the pid file. Don't reap it
+          // during that brief window; give adoption ~15s.
+          if (job.pidPending === true && Date.now() - job.startedAt < 15000) {
+            continue;
+          }
+          if (job.pidPending === true) {
+            // Adoption never succeeded; fall back to "did it produce output?"
+            job.pidPending = false;
+            if (job.bytes > 0) { continue; }
           }
           if (!pidAlive(job.pid)) {
             job.status = 'exited';

@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Shell 选择器",
-    "description": "选择 bash 工具实际调用的本机 shell（Niubash、Git Bash、MSYS2 等），并在设置中提供选择器页面。"
+    "description": "选择 bash 工具实际调用的本机 shell（Niubash、Git Bash、MSYS2、WSL 等），并自带一份可在线更新的 Niubash bash、提供持久后台任务与侧栏面板。"
   }
 }

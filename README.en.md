@@ -2,17 +2,31 @@
 
 English | [简体中文](README.md)
 
-Adds a **`bash` tool** and a **Settings → Shell** page to [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH): bash commands run in a real shell installed on the machine (Niubash, Git Bash, MSYS2, Cygwin, or any `bash.exe` on `PATH`) instead of being rewritten as PowerShell.
+Adds a **`bash` tool** and a **Settings → Shell** page to [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH): bash commands run in a real shell installed on the machine (Niubash, Git Bash, MSYS2, Cygwin, WSL, or any `bash.exe` on `PATH`) instead of being rewritten as PowerShell.
 
-On Windows the shipped `pwsh` tool is hidden as well, leaving `bash` as the only shell tool.
+**Works out of the box: the plugin ships its own [Niubash](https://github.com/unixwin/niubash) bash (on by default on Windows, with online update/upgrade), so the very first step after installing works perfectly with bash** — no separate Git Bash / MSYS2 needed. It also ships **persistent background jobs** (the `bg_start` tools plus a sidebar panel — run long-lived processes and stream their logs) and a **Settings page** to pick any local shell. On Windows the shipped `pwsh` tool is hidden as well, leaving `bash` as the only shell tool.
 
 ```
-Before: "ls" had to be written as Get-ChildItem (pwsh tool), or rely on dsh-ops' bundled
-        MSYS bash, which often fails inside the DSH sandbox.
+Before: "ls" had to be written as Get-ChildItem (pwsh tool), or rely on the MSYS bash
+        bundled with other plugins, which often fails inside the DSH sandbox.
 After:  "ls" runs in Niubash bash 5.3 directly, with the same output, exit codes
         and spill files as the official bash tool; long-lived background
         processes use the plugin's own bg_* tools.
 ```
+
+## Screenshots
+
+**Settings → Shell selector**: one dropdown lists every shell on the machine, grouped as "Embedded bash (bundled) / Bash-compatible / PowerShell series / Detected but not bash", each with its version.
+
+![Shell selector](docs/screenshots/shell-picker.png)
+
+**Embedded bash (bundled)**: the plugin can ship its own Niubash bash — ready to use on Windows. It supports **online update check, one-click upgrade, and rollback** (see "Embedded Niubash" below).
+
+![Embedded bash card (check update / up to date / installed versions)](docs/screenshots/embedded-update.png)
+
+**Background jobs sidebar (requires `dsh-better-sidebar`)**: per-conversation / all-conversations views, running / stopped groups; expand a job for a **terminal-style streaming log** (line numbers, ANSI colors, follow, search, copy, download, fullscreen) with one-click stop.
+
+![Background jobs panel](docs/screenshots/bg-jobs-panel.png)
 
 ---
 
@@ -42,7 +56,7 @@ After:  "ls" runs in Niubash bash 5.3 directly, with the same output, exit codes
 On Windows, DSH offers two shell paths out of the box:
 
 1. **The official `pwsh` tool** — the model has to write PowerShell syntax, which is a constant translation cost for bash-oriented prompts and models.
-2. **The MSYS bash bundled with `dsh-ops`** — inside DSH's restricted-token sandbox on Windows, the cygwin runtime fails to initialize (`NtSetInformationToken` / `CreateFileMapping ... Win32 error 5`), so `ops_bash` is frequently unusable.
+2. **The MSYS bash bundled with other plugins** — inside DSH's restricted-token sandbox on Windows, the cygwin runtime fails to initialize (`NtSetInformationToken` / `CreateFileMapping ... Win32 error 5`), so such a bash is frequently unusable.
 
 Meanwhile, users who installed Niubash, Git Bash or MSYS2 already have a perfectly working bash — verified: Niubash's `bash.exe` runs fine under DSH's restricted token — but DSH has no way to pick it.
 
@@ -184,6 +198,25 @@ With [`dsh-better-sidebar`](https://github.com/omdsh-dev/DSH-better-sidebar) ins
 - **Reset** clears the choice and falls back to the plugin's `shell` / `shellPath` / auto-detection;
 - **Rescan** re-reads the registry and refreshes versions (useful after installing a new shell; this one waits for the scan, every other call is served from cache).
 
+### Embedded Niubash (bundled bash, cross-platform)
+
+The plugin can **carry its own bash** so a machine with no bash at all works out of the box:
+
+- **Windows: on by default** — there is no system bash, so the bundled Niubash is the ready-to-use default. On first need it downloads the official release for `process.platform`/`arch` (win-x64 / win-arm64) and extracts it to `%DSH_HOME%/embedded-niubash/v<version>/`; a "Bundled" group appears at the top of the selector.
+- **First run defaults to bundled, then switch freely**: on a fresh install (no saved choice) with the bundled bash downloaded, `auto` picks it; once you save another shell, your choice always wins.
+- **Linux / macOS: off by default** — a system bash already exists, so the bundled one is optional (`embedded.enabled: true`).
+- **Command channel**: the bundled Niubash uses the official `--ec <base64>` encoded-command handoff, so commands pass through verbatim and quoting never breaks; exit codes and UTF-8 output match a normal bash.
+- **Install / remove**: the "Embedded Niubash" card in Settings shows "Download bundled bash" when missing and "Remove bundled bash" when present. `embedded.autoInstall` also downloads it in the background on first start.
+- **Online check / one-click upgrade / rollback** (the card above):
+  - **Check update** queries the GitHub Releases API for the latest tag and compares it to the installed version with **semantic version comparison** (`1.10.0 > 1.9.0`, not string compare), showing "Up to date" or "New version v X.Y.Z".
+  - **Upgrade** appears when a newer version exists: it downloads the new version into its own directory → runs `niu --version` to **verify it executes** → only then flips the `current` pointer to the new version (atomic; on failure the old version stays usable).
+  - **Rollback** keeps the **most recent** previous version; the card lists **installed versions** and offers **Rollback**. Rollback is an explicit pointer rewrite and is **not** blocked by the downgrade guard.
+  - **No downgrade**: `updateEmbedded` has a **downgrade guard** — it refuses to install a version lower than the current one (unless `allowDowngrade`). So even if a future plugin build pins a lower `EMBEDDED_VERSION`, it will **never downgrade** a user who already upgraded. Resolution order: `current` pointer → newest installed → pinned fallback.
+  - **Startup check (notify only, no download)**: with `embedded.checkOnStartup` the plugin checks once, non-blocking, at startup and only badges the card — it **never auto-downloads or switches**.
+  - **Network resilience**: the update check is read-only and soft-fails (returns `unknown`, never throws/blocks); downloads use **streaming writes with resume-on-reset retries** (up to 5 attempts, resuming from already-received bytes via HTTP Range), so they complete even on flaky links that reset (`ECONNRESET`).
+- **Version and license**: the fallback version is the plugin's pinned `EMBEDDED_VERSION` (only used for the very first download when nothing is installed); once installed, the `current` pointer / on-disk version wins and it can be upgraded online to any newer version. Niubash is **MIT** licensed and redistributable. Sizes: archive Windows ~11 MB (unpacked ~16 MB), Linux ~8 MB.
+- **Platform mapping**: `win32`(x64/arm64), `linux`(x64/arm64), `darwin`(arm64/x64); unsupported platforms hide the entry. `embedded.baseUrl` can point to a mirror and `embedded.releasesApi` can swap the API source.
+
 ### Choosing PowerShell (Windows)
 
 The second group in the dropdown, **PowerShell series**, runs commands through the **official `pwsh` tool** (it does not swap the `bash` executor):
@@ -242,10 +275,12 @@ Key decisions:
 ├─ index.js             Host half: shell detection, executor, per-Agent mount, pwsh filter, settings/jobs API
 ├─ background.js        Persistent background-session manager (detached procs, log files, index, orphan sweep)
 ├─ background-tools.js  bg_start / bg_output / bg_list / bg_kill tool definitions
+├─ embedded.js          Bundled Niubash: download/extract/multi-version, update check, upgrade, rollback, resume
 ├─ client.js            Client half: Settings → Shell selector + better-sidebar "Background jobs" tab
 ├─ cordis.patch.yml     Bundle patch: inserts the single `shell-switch` row
 ├─ locale/             Inventory title and description (zh / en)
 ├─ icon.svg            Plugin icon
+├─ docs/screenshots/   UI screenshots used by the READMEs
 ├─ package.json        Bundle manifest (dsh.bundle.patch + dsh.client)
 ├─ README.md           Chinese documentation
 └─ README.en.md        English documentation
@@ -275,6 +310,13 @@ The `shell-switch` row in the profile patch:
 | `background.enabled` | `true` | Enable persistent background sessions (the `bg_*` tools and the sidebar tab) |
 | `background.maxLogBytes` | `8388608` | Per-job log cap (dropped from the head when exceeded) |
 | `background.maxJobs` | `50` | Retained job count (oldest settled jobs pruned first) |
+| `background.autoCleanup` | `false` | Auto-remove stopped jobs (keep the most recent `autoCleanupKeep`) |
+| `background.autoCleanupKeep` | `20` | Stopped jobs to keep when auto-cleanup is on |
+| `embedded.enabled` | Windows `true` / else `false` | Offer the bundled Niubash in the selector |
+| `embedded.autoInstall` | `true` | Download the bundled bash in the background on first start when missing |
+| `embedded.baseUrl` | `https://github.com/unixwin/niubash/releases/download` | Bundled bash download source (point at a mirror) |
+| `embedded.releasesApi` | `https://api.github.com/repos/unixwin/niubash/releases` | GitHub Releases API source for the update check (point at a mirror) |
+| `embedded.checkOnStartup` | `true` | Non-blocking update check at startup (notify only, never downloads) |
 
 Resolution order: the Settings choice → `shellPath` → `shell` → auto-detection.
 
@@ -301,6 +343,12 @@ Host-internal endpoints, reachable only from the same origin (used by the Settin
 | `GET` | `/api/dsh-shell-switch/jobs?all=1` | All background jobs (flat list) |
 | `GET` | `/api/dsh-shell-switch/jobs/<id>/log?offset=N&limit=M` | Incremental log read from byte offset |
 | `POST` | `/api/dsh-shell-switch/jobs/<id>/kill` | `{ "reason": "…" }` stop the job and its tree (JSON content type) |
+| `GET` | `/api/dsh-shell-switch/embedded` | Bundled bash status (enabled/supported/installed, version, platform, installed versions) |
+| `POST` | `/api/dsh-shell-switch/embedded/install` | Download and install the bundled bash |
+| `POST` | `/api/dsh-shell-switch/embedded/remove` | Remove the bundled bash |
+| `POST` | `/api/dsh-shell-switch/embedded/check` | Check for updates (GitHub Releases; returns `up-to-date` / `update-available` / `unknown`) |
+| `POST` | `/api/dsh-shell-switch/embedded/update` | Upgrade to the given/latest version (verify-then-atomic-switch, downgrade-guarded) |
+| `POST` | `/api/dsh-shell-switch/embedded/rollback` | Roll back to the previously installed version |
 
 Abridged `/state` example:
 

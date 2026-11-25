@@ -49,6 +49,21 @@ window.__ModuleLoader__.load({
       embRemoved: 'Built-in bash removed',
       embFailed: 'Built-in bash action failed',
       embNotInstalled: 'not installed',
+      embCheck: 'Check for updates',
+      embChecking: 'Checking…',
+      embUpToDate: 'Up to date',
+      embAvailable: 'Update available',
+      embUpdate: 'Update',
+      embUpdating: 'Updating…',
+      embRollback: 'Roll back',
+      embRollingBack: 'Rolling back…',
+      embUnknown: 'Check failed (retry)',
+      embLatest: 'latest',
+      embCurrent: 'current',
+      embUpdated: 'Built-in bash updated',
+      embRolledBack: 'Rolled back',
+      embVersion: 'Version',
+      embVersions: 'Installed versions',
       // Background jobs tab (better-sidebar).
       bgNav: 'Background jobs',
       bgDescription: 'Detached background processes started with bg_start — they keep running after the tool call and the harness restart.',
@@ -142,6 +157,21 @@ window.__ModuleLoader__.load({
       embRemoved: '内置 bash 已移除',
       embFailed: '内置 bash 操作失败',
       embNotInstalled: '未安装',
+      embCheck: '检查更新',
+      embChecking: '检查中…',
+      embUpToDate: '已是最新',
+      embAvailable: '有新版本',
+      embUpdate: '更新',
+      embUpdating: '更新中…',
+      embRollback: '回退',
+      embRollingBack: '回退中…',
+      embUnknown: '检查失败（可重试）',
+      embLatest: '最新',
+      embCurrent: '当前',
+      embUpdated: '内置 bash 已更新',
+      embRolledBack: '已回退',
+      embVersion: '版本',
+      embVersions: '已安装版本',
       // 后台任务 tab（better-sidebar）。
       bgNav: '后台任务',
       bgDescription: '由 bg_start 启动的分离后台进程，工具调用结束后仍继续运行（重启 harness 也不受影响）。',
@@ -302,6 +332,8 @@ window.__ModuleLoader__.load({
       const [error, setError] = React.useState(null);
       const [embBusy, setEmbBusy] = React.useState(false);
       const [embMsg, setEmbMsg] = React.useState(null);
+      const [embCheck, setEmbCheck] = React.useState(null);
+      const [embOp, setEmbOp] = React.useState(null);
 
       /** Install or remove the embedded Niubash, then refresh the shell list. */
       const embeddedAction = async (action) => {
@@ -327,6 +359,72 @@ window.__ModuleLoader__.load({
         }
       };
 
+      /** Check GitHub for a newer embedded Niubash (read-only; never downloads). */
+      const checkEmbUpdate = async () => {
+        setEmbCheck('busy');
+        setEmbMsg(null);
+        try {
+          const res = await request('/embedded/check', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({}),
+          });
+          setEmbCheck(res);
+          if (res.status === 'unknown') setEmbMsg(`${t('embUnknown')}${res.error ? `：${res.error}` : ''}`);
+        } catch (failure) {
+          setEmbCheck({ status: 'unknown', error: failure.message });
+          setEmbMsg(`${t('embUnknown')}：${failure.message}`);
+        }
+      };
+
+      /** Download + switch to the latest embedded Niubash (manual click only). */
+      const updateEmb = async () => {
+        setEmbOp('update');
+        setEmbMsg(null);
+        try {
+          const res = await request('/embedded/update', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({}),
+          });
+          if (res.ok) {
+            setEmbMsg(`${t('embUpdated')}：v${res.version}${res.previous ? `（${t('embCurrent')} ${res.previous}）` : ''}`);
+            setEmbCheck({ status: 'up-to-date', current: res.version, latest: res.version });
+            await load(true);
+          } else {
+            setEmbMsg(`${t('embFailed')}：${res.error ?? ''}`);
+          }
+        } catch (failure) {
+          setEmbMsg(`${t('embFailed')}：${failure.message}`);
+        } finally {
+          setEmbOp(null);
+        }
+      };
+
+      /** Roll back to the previously installed embedded Niubash version. */
+      const rollbackEmb = async () => {
+        setEmbOp('rollback');
+        setEmbMsg(null);
+        try {
+          const res = await request('/embedded/rollback', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({}),
+          });
+          if (res.ok) {
+            setEmbMsg(`${t('embRolledBack')}：v${res.version}`);
+            setEmbCheck({ status: 'unknown', current: res.version });
+            await load(true);
+          } else {
+            setEmbMsg(`${t('embFailed')}：${res.error ?? ''}`);
+          }
+        } catch (failure) {
+          setEmbMsg(`${t('embFailed')}：${failure.message}`);
+        } finally {
+          setEmbOp(null);
+        }
+      };
+
       const load = React.useCallback(async (force, settle) => {
         setBusy(true);
         setError(null);
@@ -335,6 +433,11 @@ window.__ModuleLoader__.load({
           const next = await request(tail);
           setState(next);
           setDraft(next.selected?.path ?? next.effective?.path ?? '');
+          // Surface a startup update-check result without requiring a click.
+          const lc = next?.embedded?.lastCheck;
+          if (lc && typeof lc === 'object' && typeof lc.status === 'string') {
+            setEmbCheck((prev) => (prev === 'busy' ? prev : lc));
+          }
         } catch (failure) {
           setError(`${t('loadFailed')}：${failure.message}`);
         } finally {
@@ -420,7 +523,11 @@ window.__ModuleLoader__.load({
       }
       if (compatible.length > 0) groups.push(h('optgroup', { key: 'compatible', label: t('compatible') },
         compatible.map((shell) => h('option', { key: shell.path, value: optionValue(shell) },
-          `${shell.label}${shell.version ? ` · ${shell.version}` : ''}${shell.note ? ` — ${shell.note}` : ''}`))));
+          // Keep the option label terse: `label · version`. The longer
+          // explanatory note is shown in the detail row below the picker, not
+          // inline — an inline note here made rows wrap with a trailing wall of
+          // text (and, before the probe fix, mojibake).
+          `${shell.label}${shell.version ? ` · ${shell.version}` : ''}`))));
       if (powershell.length > 0) groups.push(h('optgroup', { key: 'powershell', label: t('powershell') },
         powershell.map((shell) => h('option', { key: shell.path, value: optionValue(shell) },
           `${shell.label}${shell.version ? ` · ${shell.version}` : ''}`))));
@@ -449,7 +556,7 @@ window.__ModuleLoader__.load({
           h('button', { type: 'button', style: styles.button, disabled: busy, onClick: () => load(false, true) }, t('refresh'))),
         message !== null ? h('p', { style: styles.message }, message) : null,
         error !== null ? h('p', { style: styles.error }, error) : null,
-        // Embedded Niubash status + install/remove.
+        // Embedded Niubash status + install/remove/update/rollback.
         embInfo !== null && embInfo.supported === true
           ? h('div', { style: styles.card },
             h('strong', { style: styles.label }, t('embTitle')),
@@ -461,7 +568,41 @@ window.__ModuleLoader__.load({
             h('div', { style: styles.row },
               embInfo.installed === true
                 ? h('button', { type: 'button', style: styles.button, disabled: embBusy, onClick: () => embeddedAction('remove') }, embBusy ? t('embWorking') : t('embRemove'))
-                : h('button', { type: 'button', style: styles.primary, disabled: embBusy, onClick: () => embeddedAction('install') }, embBusy ? t('embWorking') : t('embInstall'))),
+                : h('button', { type: 'button', style: styles.primary, disabled: embBusy, onClick: () => embeddedAction('install') }, embBusy ? t('embWorking') : t('embInstall')),
+              // Update controls only make sense once installed.
+              embInfo.installed === true
+                ? h('button', {
+                    type: 'button',
+                    style: styles.button,
+                    disabled: embCheck === 'busy' || embOp !== null,
+                    onClick: checkEmbUpdate,
+                  }, embCheck === 'busy' ? t('embChecking') : t('embCheck'))
+                : null,
+              // Show Update when a newer version is known; show Roll back when an
+              // older version is retained.
+              embInfo.installed === true && embCheck !== null && embCheck !== 'busy' && embCheck.status === 'update-available'
+                ? h('button', { type: 'button', style: styles.primary, disabled: embOp !== null, onClick: updateEmb },
+                    embOp === 'update' ? t('embUpdating') : `${t('embUpdate')} → v${embCheck.latest}`)
+                : null,
+              embInfo.installed === true && Array.isArray(embInfo.versions) && embInfo.versions.length > 1
+                ? h('button', { type: 'button', style: styles.button, disabled: embOp !== null, onClick: rollbackEmb },
+                    embOp === 'rollback' ? t('embRollingBack') : t('embRollback'))
+                : null),
+            // Update status line.
+            embCheck !== null && embCheck !== 'busy'
+              ? h('p', {
+                  style: embCheck.status === 'update-available' ? styles.message : styles.hint,
+                },
+                embCheck.status === 'update-available'
+                  ? `${t('embAvailable')}：v${embCheck.current ?? '?'} → v${embCheck.latest}`
+                  : embCheck.status === 'up-to-date'
+                    ? `${t('embUpToDate')} · ${t('embCurrent')} v${embCheck.current ?? embInfo.version}`
+                    : `${t('embUnknown')}${embCheck.error ? `：${embCheck.error}` : ''}`)
+              : null,
+            // Installed versions list (for transparency / rollback targets).
+            embInfo.installed === true && Array.isArray(embInfo.versions) && embInfo.versions.length > 0
+              ? h('p', { style: styles.hint }, `${t('embVersions')}：${embInfo.versions.join(', ')}`)
+              : null,
             embMsg !== null ? h('p', { style: styles.message }, embMsg) : null)
           : null,
         state.effective !== null

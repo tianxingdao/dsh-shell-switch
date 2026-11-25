@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Shell Selector",
-    "description": "Choose which local shell the bash tool runs in (Niubash, Git Bash, MSYS2, …) and add a Shell selector page to Settings."
+    "description": "Choose which local shell the bash tool runs in (Niubash, Git Bash, MSYS2, WSL, …), with a bundled online-updatable Niubash bash and detached background jobs with a sidebar panel."
   }
 }

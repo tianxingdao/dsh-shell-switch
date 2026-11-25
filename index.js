@@ -36,6 +36,12 @@ import {
   resolveEmbeddedExe,
   embeddedRoot,
   EMBEDDED_VERSION,
+  activeVersion,
+  installedVersions,
+  checkUpdate,
+  updateEmbedded,
+  rollbackEmbedded,
+  compareVersions,
 } from './embedded.js';
 
 const API = '/api/dsh-shell-switch';
@@ -196,6 +202,10 @@ export const Config = z.object({
     autoInstall: z.boolean().default(true),
     /** Release host override; defaults to the project's GitHub releases. */
     baseUrl: z.string().default(''),
+    /** GitHub Releases API base override (for the online update check). */
+    releasesApi: z.string().default(''),
+    /** Check GitHub for a newer Niubash on startup (prompt only, never auto-download). */
+    checkOnStartup: z.boolean().default(true),
   }).default({}),
 });
 
@@ -420,6 +430,31 @@ async function uninstallLocationsSettled() {
  */
 let wslCache = { at: 0, distros: [] };
 
+/**
+ * Sanitize a WSL distribution name decoded from `wsl.exe` output.
+ *
+ * `wsl.exe` emits UTF-16LE, but some hosts/pipes deliver the bytes such that a
+ * `utf8` decode is attempted, leaving a name like "WÖ°ØLÖ..." — UTF-16LE bytes
+ * read as UTF-8 (classic mojibake). A real distro name is a short run of
+ * printable `[A-Za-z0-9._-]` characters, so anything outside that set, plus any
+ * lingering NUL / control / replacement characters, is stripped. When that
+ * leaves nothing usable the caller drops the entry rather than showing garbage.
+ * @param {string} raw - raw decoded name.
+ * @returns {string} a cleaned name, possibly empty.
+ */
+function cleanDistroName(raw) {
+  const text = String(raw ?? '');
+  // A UTF-16LE sequence misread as UTF-8 (or vice versa) leaves Latin-1 /
+  // Latin-Extended codepoints (e.g. "Ö°ØLÖ") in a name that should be plain
+  // ASCII. That is a decode failure, not a real distro — reject it outright
+  // instead of salvaging ASCII crumbs like "WLHrg".
+  if (/[\u0080-\u024F]/.test(text)) return '';
+  return text
+    .replace(/\u0000|\uFFFD/g, '')
+    .replace(/[^A-Za-z0-9._-]/g, '')
+    .trim();
+}
+
 function wslDistros(refresh = false) {
   if (!isWin) return [];
   if (!refresh && Date.now() - wslCache.at < 600000) return wslCache.distros;
@@ -441,8 +476,10 @@ function wslDistros(refresh = false) {
     for (const line of verbose.split(/\r?\n/)) {
       const match = /^\s*\*?\s*(\S+)\s+(Running|Stopped|Installing|Uninstalling)\b/i.exec(line.replace(/\u0000/g, ''));
       if (match === null) continue;
-      if (/^docker-desktop/i.test(match[1])) continue; // utility distro, no bash
-      distros.push({ name: match[1], running: /^running$/i.test(match[2]), bash: null });
+      const name = cleanDistroName(match[1]);
+      if (name.length === 0) continue;
+      if (/^docker-desktop/i.test(name)) continue; // utility distro, no bash
+      distros.push({ name, running: /^running$/i.test(match[2]), bash: null });
     }
   }
   if (distros.length === 0) {
@@ -460,7 +497,7 @@ function wslDistros(refresh = false) {
     }
     distros = quiet
       .split(/\r?\n/)
-      .map((line) => line.replace(/\u0000/g, '').replace(/^\*/, '').trim())
+      .map((line) => cleanDistroName(line.replace(/\u0000/g, '').replace(/^\*/, '').trim()))
       .filter((name) => name.length > 0 && !/^docker-desktop/i.test(name))
       .map((name) => ({ name, running: false, bash: null }));
   }
@@ -692,6 +729,14 @@ function pathShells() {
         if (!listed) continue;
       }
       if (exe === 'bash.exe') {
+        // `%SystemRoot%\System32\bash.exe` and the Store alias
+        // `...\WindowsApps\bash.exe` are NOT a bash install — they are the
+        // legacy WSL launchers that hardcode `/bin/bash`, which does not exist
+        // on usrmerge distros (Ubuntu 24.04+), so they are broken. The real WSL
+        // entry is offered separately via `wsl.exe -d <distro>` (see
+        // `knownShells`), so listing these here only adds a dead, mislabelled
+        // "bash" row. Skip them.
+        if (/[\\/](system32|windowsapps)[\\/]bash\.exe$/i.test(candidate)) continue;
         const id = /git/i.test(dir)
           ? 'git-bash'
           : /niubash|winuxsh/i.test(dir)
@@ -734,7 +779,10 @@ function pathShells() {
 let discovery = { at: 0, shells: [] };
 
 /** Live embedded-Niubash options, set by `apply` from the row config. */
-let embeddedOptions = { enabled: isWin, autoInstall: true, baseUrl: '' };
+let embeddedOptions = { enabled: isWin, autoInstall: true, baseUrl: '', releasesApi: '' };
+
+/** Last embedded update-check result, so the panel can show it without a call. */
+let embeddedUpdateState = { status: 'unknown', at: 0 };
 
 /**
  * The embedded Niubash as a picker entry, or undefined when disabled / the
@@ -749,14 +797,16 @@ function embeddedShellEntry() {
   const exe = resolveEmbeddedExe();
   const installed = exe !== undefined;
   if (!installed && embeddedOptions.autoInstall === false) return undefined;
+  const ver = activeVersion() ?? EMBEDDED_VERSION;
   return {
     path: installed ? exe : path.join(embeddedRoot(), `<not-installed-${process.platform}-${process.arch}>`),
     id: 'embedded-niu',
-    label: installed ? `内置 Niubash ${EMBEDDED_VERSION}` : `内置 Niubash（未安装，点「重新扫描」下载）`,
+    label: installed ? `内置 Niubash ${ver}` : `内置 Niubash（未安装，点「重新扫描」下载）`,
     kind: 'bash',
     dialect: 'niu',
     embedded: true,
     installed,
+    version: installed ? ver : '',
     compatible: true,
     source: 'embedded',
     note: installed ? '自带' : '待下载',
@@ -877,11 +927,14 @@ async function discoverShells(refresh = false) {
   shells.length = 0;
   shells.push(...unique);
 
-  // `WindowsApps\bash.exe` is a Store alias for the same WSL launcher as
-  // `System32\bash.exe`, so the named entry replaces it.
-  const isStoreBashAlias = (shell) => /[\\/]windowsapps[\\/]bash\.exe$/i.test(String(shell.path ?? ''));
+  // `WindowsApps\bash.exe` (Store alias) and `System32\bash.exe` are both just
+  // the legacy WSL launcher, the same thing the named `wsl.exe -d <distro>`
+  // entry drives — and both hardcode `/bin/bash`, which breaks on usrmerge
+  // distros. When a real WSL entry exists, drop these dead launcher rows so the
+  // list shows the working `wsl.exe` entry instead of two broken "bash" rows.
+  const isWslBashLauncher = (shell) => /[\\/](?:windowsapps|windows[\\/]system32)[\\/]bash\.exe$/i.test(String(shell.path ?? ''));
   if (shells.some((shell) => shell.source === 'well-known' && shell.id === 'wsl')) {
-    const filtered = shells.filter((shell) => !isStoreBashAlias(shell));
+    const filtered = shells.filter((shell) => !isWslBashLauncher(shell));
     shells.length = 0;
     shells.push(...filtered);
   }
@@ -898,11 +951,40 @@ let versionsWarming = false;
  * @returns {string} the version, or an empty string when it cannot be read.
  */
 function probeVersion(shell) {
-  const cached = versions.get(shell.path);
+  const cacheKey = `${shell.path}#${shell.distro ?? ''}`;
+  const cached = versions.get(cacheKey);
   if (cached !== undefined && Date.now() - cached.at < 600000) return cached.version;
   let version = '';
   try {
-    if (shell.kind === 'bash') {
+    if (isWslLauncher(shell)) {
+      // Probe the bash version INSIDE the distro. Never run `wsl.exe --version`:
+      // on a localized Windows that prints UTF-16LE ("WSL 内核版本: ...") which,
+      // decoded as utf8, turns into mojibake like "W\u0000S\u0000L\u0000…".
+      // `wsl -d <distro> bash -c 'printf %s "$BASH_VERSION"'` returns a clean
+      // ASCII version string that matches the other bash rows. Try the plain
+      // form first, then `-e bash` (some configurations need the exec flag).
+      const target = shell.distro ? ['-d', shell.distro] : [];
+      const probeArgv = [
+        [...target, 'bash', '-c', 'printf %s "$BASH_VERSION"'],
+        [...target, '-e', 'bash', '-c', 'printf %s "$BASH_VERSION"'],
+        [...target, '--', 'bash', '-c', 'printf %s "$BASH_VERSION"'],
+      ];
+      for (const argv of probeArgv) {
+        try {
+          const output = execFileSync('wsl.exe', argv, {
+            encoding: 'buffer',
+            windowsHide: true,
+            timeout: 6000,
+            maxBuffer: 64 * 1024,
+          });
+          const text = output.includes(0) ? output.toString('utf16le') : output.toString('utf8');
+          const matched = /([0-9]+\.[0-9]+(?:\.[0-9]+)?)/.exec(text)?.[1];
+          if (matched) { version = matched; break; }
+        } catch {
+          // try the next argv form
+        }
+      }
+    } else if (shell.kind === 'bash') {
       const output = execFileSync(shell.path, ['--version'], {
         encoding: 'utf8',
         windowsHide: true,
@@ -921,7 +1003,7 @@ function probeVersion(shell) {
   } catch {
     version = '';
   }
-  versions.set(shell.path, { at: Date.now(), version });
+  versions.set(cacheKey, { at: Date.now(), version });
   return version;
 }
 
@@ -937,7 +1019,8 @@ function probeVersion(shell) {
  * @returns {Array<Record<string, unknown>>} shells annotated with cached versions.
  */
 function withVersions(shells) {
-  const pending = shells.filter((shell) => shell.compatible && !versions.has(shell.path));
+  const keyOf = (shell) => `${shell.path}#${shell.distro ?? ''}`;
+  const pending = shells.filter((shell) => shell.compatible && !versions.has(keyOf(shell)));
   if (pending.length > 0 && !versionsWarming) {
     versionsWarming = true;
     setImmediate(() => {
@@ -949,7 +1032,7 @@ function withVersions(shells) {
     });
   }
   return shells.map((shell) => {
-    const cached = versions.get(shell.path);
+    const cached = versions.get(keyOf(shell));
     return { ...shell, version: cached?.version ?? '' };
   });
 }
@@ -1188,19 +1271,47 @@ async function resolveShellArgv(config, command, workdir) {
     const flags = ['-NoLogo', loadProfile ? null : '-NoProfile', '-NonInteractive', '-Command', bootstrap].filter(
       (flag) => flag !== null,
     );
-    return { argv: [shell.path, ...flags], cwd, shellLabel: shell.label };
+    return { argv: [shell.path, ...flags], cwd, shellLabel: shell.label, selfRedirect: true, dialect: 'powershell' };
   }
   if (isWslLauncher(shell)) {
-    return { argv: wslCommand(shell.path, command, cwd, shell.distro), cwd, shellLabel: shell.label };
+    return { argv: wslCommand(shell.path, command, cwd, shell.distro), cwd, shellLabel: shell.label, selfRedirect: true, dialect: 'wsl', wslDistro: shell.distro, wslLauncher: shell.path };
   }
   if (isNiu(shell)) {
     const exe = shell.installed === false ? undefined : resolveEmbeddedExe();
     if (exe === undefined) {
       throw new Error('内置 Niubash 尚未安装；请在 设置 → Shell 选择器 点「安装内置 bash」或「重新扫描」下载');
     }
-    return { argv: niuCommand(exe, command), cwd, shellLabel: shell.label };
+    // Bundled Niu reliably writes to an inherited detached fd — no self-redirect.
+    return { argv: niuCommand(exe, command), cwd, shellLabel: shell.label, selfRedirect: false, dialect: 'niu' };
   }
-  return { argv: [shell.path, '-c', command], cwd, shellLabel: shell.label };
+  // Plain bash-family (Git Bash / MSYS2 / Cygwin). These need self-redirect
+  // (they don't write to an inherited detached fd), and a detached Git Bash
+  // needs its own coreutils dirs on PATH or `sleep`/`ls`/`date` go missing.
+  return {
+    argv: [shell.path, '-c', command],
+    cwd,
+    shellLabel: shell.label,
+    selfRedirect: true,
+    dialect: 'bash',
+    extraPath: bashExtraPath(shell.path),
+  };
+}
+
+/**
+ * The bin directories a Windows bash needs on PATH when launched detached (its
+ * `usr/bin` holds the coreutils, `mingw64/bin` the winpty/helpers). Derived from
+ * `<root>/usr/bin/bash.exe` → [`<root>/usr/bin`, `<root>/mingw64/bin`]. Returns
+ * undefined for a path that does not look like a Git/MSYS tree.
+ * @param {string} bashPath - the bash.exe path.
+ * @returns {string[] | undefined} extra PATH directories.
+ */
+function bashExtraPath(bashPath) {
+  const normalized = String(bashPath ?? '');
+  const match = /^(.*)[\\/]usr[\\/]bin[\\/]bash\.exe$/i.exec(normalized);
+  if (match === null) return undefined;
+  const binDir = path.dirname(normalized);
+  const root = path.dirname(path.dirname(binDir)); // <root>
+  return [binDir, path.join(root, 'mingw64', 'bin')];
 }
 
 /**
@@ -1478,7 +1589,9 @@ async function statePayload(ctx, config, refresh, settle = false) {
       enabled: embeddedOptions.enabled !== false,
       supported: embeddedAssetFor() !== undefined,
       installed: embeddedInstalled(),
-      version: EMBEDDED_VERSION,
+      version: activeVersion() ?? EMBEDDED_VERSION,
+      versions: installedVersions(),
+      lastCheck: embeddedUpdateState,
       platform: process.platform,
       arch: process.arch,
     },
@@ -1512,12 +1625,14 @@ function registerRoutes(ctx, config) {
             supported: desc !== undefined,
             enabled: embeddedOptions.enabled !== false,
             installed: embeddedInstalled(),
-            version: EMBEDDED_VERSION,
+            version: activeVersion() ?? EMBEDDED_VERSION,
+            versions: installedVersions(),
             asset: desc?.asset ?? null,
             platform: process.platform,
             arch: process.arch,
             root: embeddedRoot(),
             exe: resolveEmbeddedExe() ?? null,
+            lastCheck: embeddedUpdateState,
           });
         }
         if (req.method === 'POST' && tail === '/embedded/install') {
@@ -1525,12 +1640,55 @@ function registerRoutes(ctx, config) {
             return json(res, 415, { ok: false, error: 'content-type must be application/json' });
           }
           const result = await installEmbedded({ baseUrl: embeddedOptions.baseUrl || undefined, debug: (...p) => debug('embedded', ...p) });
-          if (result.ok) discovery = { at: 0, shells: [] };
+          if (result.ok) { discovery = { at: 0, shells: [] }; embeddedUpdateState = { status: 'unknown', at: Date.now() }; }
           return json(res, result.ok ? 200 : 500, result);
+        }
+        if (req.method === 'POST' && tail === '/embedded/check') {
+          // Live check against GitHub Releases; read-only (never downloads).
+          const result = await checkUpdate({ apiBase: embeddedOptions.releasesApi || undefined });
+          embeddedUpdateState = { ...result, at: Date.now() };
+          return json(res, 200, { ok: result.status !== 'unknown', ...embeddedUpdateState });
+        }
+        if (req.method === 'POST' && tail === '/embedded/update') {
+          if (!String(req.headers['content-type'] ?? '').toLowerCase().includes('application/json')) {
+            return json(res, 415, { ok: false, error: 'content-type must be application/json' });
+          }
+          let body = {};
+          try { body = await readJson(req); } catch { body = {}; }
+          // Resolve the target tag: explicit body.tag, else re-check for latest.
+          let target = typeof body?.tag === 'string' ? body.tag : undefined;
+          if (target === undefined) {
+            const checked = await checkUpdate({ apiBase: embeddedOptions.releasesApi || undefined });
+            if (checked.status !== 'update-available' || typeof checked.latest !== 'string') {
+              return json(res, 400, { ok: false, error: checked.status === 'up-to-date' ? 'already up to date' : (checked.error ?? 'no newer version found') });
+            }
+            target = checked.latest;
+          }
+          const result = await updateEmbedded(target, {
+            baseUrl: embeddedOptions.baseUrl || undefined,
+            keep: 1,
+            debug: (...p) => debug('embedded', ...p),
+          });
+          if (result.ok) {
+            discovery = { at: 0, shells: [] };
+            embeddedUpdateState = { status: 'up-to-date', current: result.version, latest: result.version, at: Date.now() };
+          }
+          return json(res, result.ok ? 200 : 500, result);
+        }
+        if (req.method === 'POST' && tail === '/embedded/rollback') {
+          if (!String(req.headers['content-type'] ?? '').toLowerCase().includes('application/json')) {
+            return json(res, 415, { ok: false, error: 'content-type must be application/json' });
+          }
+          let body = {};
+          try { body = await readJson(req); } catch { body = {}; }
+          const result = rollbackEmbedded(typeof body?.tag === 'string' ? body.tag : undefined);
+          if (result.ok) { discovery = { at: 0, shells: [] }; embeddedUpdateState = { status: 'unknown', current: result.version, at: Date.now() }; }
+          return json(res, result.ok ? 200 : 400, result);
         }
         if (req.method === 'POST' && tail === '/embedded/remove') {
           const result = removeEmbedded();
           discovery = { at: 0, shells: [] };
+          embeddedUpdateState = { status: 'unknown', at: Date.now() };
           return json(res, 200, result);
         }
         if (req.method === 'GET' && (tail === '/' || tail === '/state')) {
@@ -1901,6 +2059,8 @@ export function apply(ctx, config) {
       enabled: valueOf(inner.enabled, isWin) !== false,
       autoInstall: valueOf(inner.autoInstall, true) !== false,
       baseUrl: String(valueOf(inner.baseUrl, '') ?? ''),
+      releasesApi: String(valueOf(inner.releasesApi, '') ?? ''),
+      checkOnStartup: valueOf(inner.checkOnStartup, true) !== false,
     };
     const anyInstalled = embeddedInstalled();
     if (embeddedOptions.enabled && embeddedOptions.autoInstall && !anyInstalled && embeddedAssetFor() !== undefined) {
@@ -1913,6 +2073,21 @@ export function apply(ctx, config) {
           .catch(() => {});
       }, 2500);
       timer.unref?.();
+    }
+    // Online update check at startup: PROMPT ONLY. It records the result (so the
+    // Settings panel shows "update available") but never downloads or switches
+    // anything — the user must click Update. Runs after the install above so a
+    // fresh install is checked once, and is deliberately delayed + non-blocking.
+    if (embeddedOptions.enabled && embeddedOptions.checkOnStartup && embeddedAssetFor() !== undefined) {
+      const checkTimer = setTimeout(() => {
+        void checkUpdate({ apiBase: embeddedOptions.releasesApi || undefined })
+          .then((r) => {
+            embeddedUpdateState = { ...r, at: Date.now() };
+            debug('embedded-check', r.status, r.current ?? '', r.latest ?? '');
+          })
+          .catch(() => {});
+      }, anyInstalled ? 4000 : 12000);
+      checkTimer.unref?.();
     }
   }
   // Create the shared background manager once, before any Agent attaches so
@@ -1977,7 +2152,7 @@ export function apply(ctx, config) {
           if (cancelled) return;
           const shells = await discoverShells(true);
           for (const shell of shells) {
-            if (shell.compatible && isWslLauncher(shell) === false) probeVersion(shell);
+            if (shell.compatible) probeVersion(shell);
           }
           if (cancelled) return;
           // Drop the cached list so the page's next read reflects the probes.

@@ -4,6 +4,64 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] — 2026-11-25
+
+### Added
+
+- **Embedded Niubash online update** — the built-in bash card now supports
+  **check-for-update / one-click upgrade / rollback**:
+  - *Check update* queries the GitHub Releases API and compares the latest tag
+    to the installed version with a real semantic comparison (`1.10.0 > 1.9.0`);
+  - *Upgrade* downloads the new version into its own directory, runs
+    `niu --version` to verify it executes, then atomically flips a `current`
+    pointer (a failed upgrade leaves the old version usable);
+  - *Rollback* keeps the most recent previous version and offers a one-click
+    rollback (an explicit pointer rewrite, not blocked by the downgrade guard);
+  - **Downgrade guard**: `updateEmbedded` refuses to install an older version
+    than the current one (unless `allowDowngrade`), so a future plugin build
+    that pins a lower fallback `EMBEDDED_VERSION` can never downgrade a user who
+    already upgraded;
+  - *Startup check* (`embedded.checkOnStartup`, default on) notifies only, never
+    downloads or switches;
+  - New routes `POST /embedded/check`, `/embedded/update`, `/embedded/rollback`;
+    config `embedded.{releasesApi,checkOnStartup}`.
+- **Network-resilient downloads** — the embedded-bash download now streams to
+  disk with resume-on-reset retries (up to 5 attempts, resuming from already
+  received bytes via HTTP Range), so it completes on flaky links that reset
+  (`ECONNRESET`) — verified against the real GitHub release asset.
+
+### Fixed
+
+- **Windows shell-detection cleanup** — `System32\bash.exe` and the Store
+  `WindowsApps\bash.exe` are the legacy WSL launchers (they hardcode
+  `/bin/bash`, absent on usrmerge distros like Ubuntu 24.04); they are no longer
+  listed as broken "bash" rows next to the real `wsl.exe -d <distro>` entry.
+- **WSL distro-name mojibake** — a UTF-16LE value misread as UTF-8 produced
+  garbage like `WÖ°ØLÖ…`; distribution names are now sanitized and bad decodes
+  dropped. The WSL row shows the distro's own bash version (e.g. `5.2.21`), and
+  the picker option no longer inlines the long note.
+
+- **Background jobs now work for every shell** (previously only the bundled
+  Niubash produced logs when detached):
+  - **Git Bash / MSYS2** — a detached launch now gets its own `usr/bin` +
+    `mingw64/bin` on PATH, so `sleep`/`ls`/`date` resolve;
+  - **WSL** — the command is written to a `.sh` and run as
+    `wsl.exe -d <distro> bash <file>` (a `-lc "<cmd>"` argument mangles `$i`
+    and `$(...)`, and without `-d` it fails with `exit 127 /bin/sh: bash: not
+    found`); the distro is auto-resolved when not supplied; WSL detection no
+    longer misclassifies a Git Bash `bash.exe` as WSL;
+  - **PowerShell 7 / 5.1** — `spawn(detached)` exits without running the command
+    on Windows, so PowerShell jobs launch through `cmd /c start "" /b` (which
+    keeps a console context) and adopt the real `pwsh` PID from a pid file.
+  All five shells (embedded Niubash, Git Bash, WSL, PowerShell 7, PowerShell
+  5.1) now produce streaming background logs — verified on a live host.
+
+### Changed
+
+- README / README.en / package description / locale updated to cover the
+  bundled bash, online update, and the background-jobs panel, with screenshots
+  under `docs/screenshots/`.
+
 ## [0.4.1] — 2026-11-24
 
 First public release of the embedded-bash feature. (0.4.0 was withdrawn before

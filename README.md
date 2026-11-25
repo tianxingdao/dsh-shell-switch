@@ -2,14 +2,28 @@
 
 [English](README.en.md) | 简体中文
 
-给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）加一个 **`bash` 工具**和一个 **设置 → Shell 选择器** 页面：bash 命令直接在本机真实存在的 shell（Niubash / Git Bash / MSYS2 / Cygwin / PATH 里的 `bash.exe`）里执行，不再被改写成 PowerShell 命令。
+给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）加一个 **`bash` 工具**和一个 **设置 → Shell 选择器** 页面：bash 命令直接在本机真实存在的 shell（Niubash / Git Bash / MSYS2 / Cygwin / WSL / PATH 里的 `bash.exe`）里执行，不再被改写成 PowerShell 命令。
 
-Windows 下还会隐藏官方 `pwsh` 工具，让 `bash` 成为唯一的 shell 工具。
+**装完即用：插件自带一份 [Niubash](https://github.com/unixwin/niubash) bash（Windows 开箱即用、可在线更新升级），装好插件第一步就能完美跑 bash**——无需另装 Git Bash / MSYS2。此外还自带**持久后台任务**（`bg_start` 等工具 + 侧栏面板，跑常驻进程、流式看日志），以及一个能选择本机任意 shell 的**设置页**。Windows 下还会隐藏官方 `pwsh` 工具，让 `bash` 成为唯一的 shell 工具。
 
 ```
-之前：模型想跑 ls → 必须写成 Get-ChildItem（pwsh 工具），或依赖 dsh-ops 自带的 MSYS bash（沙箱里经常起不来）
+之前：模型想跑 ls → 必须写成 Get-ChildItem（pwsh 工具），或依赖其他插件自带的 MSYS bash（沙箱里经常起不来）
 之后：模型跑 ls → 直接在 Niubash bash 5.3 里执行，输出、退出码、spill 与官方 bash 工具一致；常驻后台进程走插件自带的 bg_* 工具
 ```
+
+## 截图
+
+**设置 → Shell 选择器**：一个下拉框列出本机所有 shell，分「内置 bash（插件自带）/ 可用于 bash / PowerShell系列 / 已检测到但不可选」四组，每项带版本号。
+
+![Shell 选择器](docs/screenshots/shell-picker.png)
+
+**内置 bash（插件自带）**：插件可自带一份 Niubash bash，Windows 开箱即用；支持**在线检查更新、一键升级到新版、回退旧版**（详见下文「内置 Niubash」）。
+
+![内置 bash 卡片（检查更新 / 已是最新 / 已安装版本）](docs/screenshots/embedded-update.png)
+
+**后台任务侧栏（依赖 `dsh-better-sidebar`）**：本会话 / 全部会话视图，运行中 / 已停止分组；点开任务看**终端风格流式日志**（行号、ANSI 颜色、跟随最新、搜索、复制、下载、全屏），一键停止。
+
+![后台任务面板](docs/screenshots/bg-jobs-panel.png)
 
 ---
 
@@ -39,7 +53,7 @@ Windows 下还会隐藏官方 `pwsh` 工具，让 `bash` 成为唯一的 shell �
 Windows 上的 DSH 默认有两条 shell 路径：
 
 1. **官方 `pwsh` 工具** —— 模型必须把命令写成 PowerShell 语法；对习惯 bash 的模型/提示词来说，这是持续的翻译成本。
-2. **`dsh-ops` 自带的 MSYS bash** —— 在 DSH 的 Windows 受限令牌沙箱里，cygwin 初始化会失败（`NtSetInformationToken` / `CreateFileMapping ... Win32 error 5`），`ops_bash` 往往直接不可用。
+2. **其他插件方式自带的 MSYS bash** —— 在 DSH 的 Windows 受限令牌沙箱里，cygwin 初始化会失败（`NtSetInformationToken` / `CreateFileMapping ... Win32 error 5`），这类 bash 往往直接不可用。
 
 同时，Windows 上装了 Niubash、Git Bash、MSYS2 的用户，这些 bash 明明能正常跑（实测 Niubash 的 `bash.exe` 在 DSH 受限令牌下工作正常），但 DSH 并没有「选择本机 shell」的能力。
 
@@ -167,8 +181,15 @@ bash: {
 - **Linux / macOS：默认不启用**——系统已有 bash，内置只是可选项（默认隐藏，可在配置 `embedded.enabled: true` 打开）。
 - **命令通道**：内置 Niubash 走官方 `--ec <base64>`（`-EncodedCommand` 的 bash 版），命令原样传递、天然免引号穿透；退出码、UTF-8 输出与普通 bash 一致。
 - **安装/移除**：设置页「Shell 选择器」里有「内置 Niubash」卡片——未安装时显示「下载内置 bash」，已安装时显示「移除内置 bash」。`embedded.autoInstall` 为真时首启也会在后台自动下载。
-- **版本与许可**：内置版本由插件固定的 `EMBEDDED_VERSION` 决定；Niubash 为 **MIT** 许可，可随插件再分发。体积约：压缩包 Windows ~11 MB（解压 ~16 MB）、Linux ~8 MB。
-- **平台映射**：`win32`(x64/arm64)、`linux`(x64/arm64)、`darwin`(arm64/x64)；不支持的平台不出现该项。`embedded.baseUrl` 可指向镜像。
+- **在线检查更新 / 一键升级 / 回退**（见上图卡片）：
+  - **检查更新**：点「检查更新」查询 [GitHub Releases API](https://api.github.com/repos/unixwin/niubash/releases/latest) 拿最新 tag，与本地已装版本做**语义化版本比较**（`1.10.0 > 1.9.0`，不是字符串比较），显示「已是最新」或「有新版本 v X.Y.Z」。
+  - **一键升级**：有新版本时出现「更新」按钮，下载新版本到独立目录 → 跑 `niu --version` **校验可执行** → 校验通过才把 `current` 指针切到新版（原子切换，失败则旧版继续可用）。
+  - **回退**：保留**最近一个**旧版本，设置页显示「已安装版本」并可「回退」。回退是显式的指针改写，**不受降级保护限制**。
+  - **不降级**：`updateEmbedded` 带**降级防护**——目标版本低于当前已装版本时**拒绝**（除非显式 `allowDowngrade`）。因此即使将来某个插件版本的兜底 `EMBEDDED_VERSION` 低于用户已升级到的版本，也**绝不会把用户降级**；解析优先级是 `current` 指针 → 已装最新版 → 兜底常量。
+  - **启动自动检查（只提示不下载）**：`embedded.checkOnStartup` 为真时，启动后非阻塞查一次，有新版本只在卡片标注，**绝不自动下载或切换**。
+  - **网络失败容错**：检查更新是只读、软失败（返回 `unknown` 不抛错不阻塞）；下载采用**流式写盘 + 断点续传重试**（最多 5 次，失败从已下字节用 HTTP Range 续传），在受限网络（频繁 `ECONNRESET`）下仍能完成。
+- **版本与许可**：兜底版本由插件固定的 `EMBEDDED_VERSION` 决定（仅用于"从未安装"时的首次下载）；已安装后以 `current` 指针/磁盘版本为准，可在线升级到任意更新版本。Niubash 为 **MIT** 许可，可随插件再分发。体积约：压缩包 Windows ~11 MB（解压 ~16 MB）、Linux ~8 MB。
+- **平台映射**：`win32`(x64/arm64)、`linux`(x64/arm64)、`darwin`(arm64/x64)；不支持的平台不出现该项。`embedded.baseUrl` 可指向镜像，`embedded.releasesApi` 可换 API 源。
 
 > 说明：内置的 `niu.exe` 官方尚未做代码签名，个别环境首次运行可能触发 SmartScreen 提示；从插件目录直接 spawn 一般无碍。
 
@@ -259,10 +280,12 @@ Agent 创建
 ├─ index.js              Host 半：shell 检测、执行器、按 Agent 挂载、pwsh 屏蔽、设置/任务 API
 ├─ background.js         持久后台会话管理器（detached 进程、日志落盘、索引、orphan 扫描）
 ├─ background-tools.js   bg_start / bg_output / bg_list / bg_kill 工具定义
+├─ embedded.js           内置 Niubash：下载/解压/多版本、检查更新、升级、回退、断点续传
 ├─ client.js             Client 半：设置 → Shell 选择器 + better-sidebar「后台任务」页
 ├─ cordis.patch.yml      bundle 补丁，只插入一行 shell-switch
 ├─ locale/               插件清单里的标题与描述（zh / en）
 ├─ icon.svg              插件图标
+├─ docs/screenshots/     README 用的界面截图
 ├─ package.json          bundle 清单（dsh.bundle.patch + dsh.client）
 ├─ README.md             中文说明
 └─ README.en.md          英文说明
@@ -297,6 +320,8 @@ profile patch 中的 `shell-switch` 行：
 | `embedded.enabled` | Windows `true` / 其他 `false` | 是否在选择器提供「内置 Niubash」 |
 | `embedded.autoInstall` | `true` | 缺失时首启是否后台自动下载内置 bash |
 | `embedded.baseUrl` | `https://github.com/unixwin/niubash/releases/download` | 内置 bash 的下载源（可指向镜像） |
+| `embedded.releasesApi` | `https://api.github.com/repos/unixwin/niubash/releases` | 检查更新用的 GitHub Releases API 源（可指向镜像） |
+| `embedded.checkOnStartup` | `true` | 启动后是否非阻塞检查一次更新（只提示，不下载） |
 
 选择优先级：设置页保存的路径 → `shellPath` → `shell` → 自动检测。
 
@@ -323,6 +348,12 @@ Host 内部接口，仅同源页面可访问（供设置页使用；通过局域
 | `GET` | `/api/dsh-shell-switch/jobs?all=1` | 全部后台任务（扁平列表） |
 | `GET` | `/api/dsh-shell-switch/jobs/<id>/log?offset=N&limit=M` | 从字节 offset 增量读取某任务日志 |
 | `POST` | `/api/dsh-shell-switch/jobs/<id>/kill` | `{ "reason": "…" }` 结束任务及其进程树（需 JSON 内容类型） |
+| `GET` | `/api/dsh-shell-switch/embedded` | 内置 bash 状态（是否启用/支持/已安装、版本、平台、已装版本列表） |
+| `POST` | `/api/dsh-shell-switch/embedded/install` | 下载并安装内置 bash |
+| `POST` | `/api/dsh-shell-switch/embedded/remove` | 移除内置 bash |
+| `POST` | `/api/dsh-shell-switch/embedded/check` | 检查更新（查 GitHub Releases，返回 `up-to-date` / `update-available` / `unknown`） |
+| `POST` | `/api/dsh-shell-switch/embedded/update` | 升级到指定/最新版本（校验可执行后原子切换，带降级防护） |
+| `POST` | `/api/dsh-shell-switch/embedded/rollback` | 回退到已装的上一版本 |
 
 `/state` 示例（截断）：
 

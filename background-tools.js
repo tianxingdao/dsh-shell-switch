@@ -106,6 +106,15 @@ export function buildBackgroundTools(deps) {
         shellLabel: resolved.shellLabel,
         sessionId: ownerOf(exec),
         sessionCwd: resolved.cwd,
+        // How the child's output reaches the log file: Niu writes to an
+        // inherited fd; WSL/PowerShell/Git Bash must redirect themselves, and a
+        // detached Git Bash needs its coreutils dirs on PATH.
+        selfRedirect: resolved.selfRedirect === true,
+        dialect: resolved.dialect,
+        shellDialect: resolved.dialect,
+        extraPath: resolved.extraPath,
+        wslDistro: resolved.wslDistro,
+        wslLauncher: resolved.wslLauncher,
       });
       return {
         ok: true,
