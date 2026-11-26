@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.3] — 2026-11-26
+
+### Added
+
+- **Manually add a shell path** — besides auto-detection, the Settings → Shell
+  page now has a "或手动输入 shell 路径 / Or enter a shell path manually" field.
+  Type any executable path (e.g. a custom bash build, or a shell in an unusual
+  location) and click "添加此路径 / Add this path": the path is validated (it must
+  exist and be a bash-family shell or PowerShell — `cmd.exe`, `notepad.exe`, or a
+  random binary is rejected with a clear error), its version is probed, and it is
+  **added as a new option in the dropdown** under a "手动添加 / Manually added"
+  group. You then pick it in the dropdown and Save as usual. Manually-added
+  paths can be removed again from the same card.
+
 ## [0.4.2] — 2026-11-25
 
 ### Added

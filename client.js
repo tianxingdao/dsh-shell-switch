@@ -29,6 +29,16 @@ window.__ModuleLoader__.load({
       reset: 'Use default',
       saved: 'Saved. The next bash command uses this shell.',
       resetDone: 'Reset to the deployment default.',
+      manualLabel: 'Or enter a shell path manually',
+      manualPlaceholder: 'e.g. D:\\tools\\git\\bin\\bash.exe',
+      manualUse: 'Add this path',
+      manualHint: 'Use this when auto-detection misses your shell. The path is validated (must exist and be a bash-family shell or PowerShell) and added to the dropdown above — pick it there and Save.',
+      manualGroup: 'Manually added',
+      manualTag: 'manual',
+      manualRemove: 'Remove',
+      added: 'Added to the list. Pick it in the dropdown above, then Save.',
+      removed: 'Removed.',
+      addFailed: 'Could not add the path',
       loading: 'Detecting local shells…',
       empty: 'No shell detected on this machine.',
       incompatible: 'not bash-compatible',
@@ -137,6 +147,16 @@ window.__ModuleLoader__.load({
       reset: '恢复默认',
       saved: '已保存，下一条 bash 命令将使用该 shell。',
       resetDone: '已恢复为部署默认值。',
+      manualLabel: '或手动输入 shell 路径',
+      manualPlaceholder: '例如 D:\\tools\\git\\bin\\bash.exe',
+      manualUse: '添加此路径',
+      manualHint: '自动检测漏掉你的 shell 时用这个。路径会被校验（必须存在、是 bash 方言或 PowerShell），并添加到上方下拉框——在上方选中它再点保存。',
+      manualGroup: '手动添加',
+      manualTag: '手动',
+      manualRemove: '移除',
+      added: '已添加到列表，请在上方下拉框选中它再点保存。',
+      removed: '已移除。',
+      addFailed: '添加路径失败',
       loading: '正在检测本机 shell…',
       empty: '本机未检测到任何 shell。',
       incompatible: '不兼容 bash',
@@ -280,6 +300,28 @@ window.__ModuleLoader__.load({
         fontSize: '13px',
       },
       row: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' },
+      input: {
+        flex: '1 1 260px',
+        minWidth: '200px',
+        padding: '8px 10px',
+        borderRadius: '8px',
+        border: '1px solid var(--dsw-alias-border-l1)',
+        background: 'var(--dsw-alias-bg-layer-1)',
+        color: 'var(--dsw-alias-label-primary)',
+        fontSize: '13px',
+        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+      },
+      manualList: { display: 'grid', gap: '4px', marginTop: '2px' },
+      manualItem: { display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', color: 'var(--dsw-alias-label-secondary)' },
+      miniRemove: {
+        padding: '2px 8px',
+        fontSize: '11px',
+        borderRadius: '6px',
+        border: '1px solid var(--dsw-alias-border-l1)',
+        background: 'transparent',
+        color: 'var(--dsw-alias-label-secondary)',
+        cursor: 'pointer',
+      },
       button: {
         padding: '7px 14px',
         borderRadius: '8px',
@@ -334,6 +376,7 @@ window.__ModuleLoader__.load({
       const [embMsg, setEmbMsg] = React.useState(null);
       const [embCheck, setEmbCheck] = React.useState(null);
       const [embOp, setEmbOp] = React.useState(null);
+      const [manualPath, setManualPath] = React.useState('');
 
       /** Install or remove the embedded Niubash, then refresh the shell list. */
       const embeddedAction = async (action) => {
@@ -496,6 +539,49 @@ window.__ModuleLoader__.load({
         }
       };
 
+      const addManual = async () => {
+        const value = manualPath.trim();
+        if (value === '') return;
+        setBusy(true);
+        setError(null);
+        setMessage(null);
+        try {
+          // Add the path to the picker (does not switch to it); the user then
+          // selects it in the dropdown and saves.
+          const next = await request('/custom/add', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ path: value }),
+          });
+          setState(next);
+          setManualPath('');
+          setMessage(t('added'));
+        } catch (failure) {
+          setError(`${t('addFailed')}：${failure.message}`);
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      const removeManual = async (value) => {
+        setBusy(true);
+        setError(null);
+        setMessage(null);
+        try {
+          const next = await request('/custom/remove', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ path: value }),
+          });
+          setState(next);
+          setMessage(t('removed'));
+        } catch (failure) {
+          setError(`${t('addFailed')}：${failure.message}`);
+        } finally {
+          setBusy(false);
+        }
+      };
+
       if (state === null) {
         return h('div', { style: styles.page }, h('p', { style: styles.description }, busy || error === null ? t('loading') : error));
       }
@@ -503,12 +589,14 @@ window.__ModuleLoader__.load({
       const shells = Array.isArray(state.shells) ? state.shells : [];
       const isPs = (shell) => shell.dialect === 'powershell' || shell.kind === 'powershell';
       const isEmbedded = (shell) => shell.id === 'embedded-niu' || shell.source === 'embedded';
+      const isManual = (shell) => shell.manual === true;
       const embedded = shells.find(isEmbedded) ?? null;
       // A locally-installed Niubash stays a normal bash-family shell and lives
       // in the generic "can runs bash" group — only the plugin's OWN embedded
-      // bash gets a separate group.
-      const compatible = shells.filter((shell) => shell.compatible === true && !isPs(shell) && !isEmbedded(shell));
-      const powershell = shells.filter((shell) => shell.compatible === true && isPs(shell));
+      // bash gets a separate group. Manually-added paths get their own group.
+      const manual = shells.filter((shell) => isManual(shell) && shell.compatible === true);
+      const compatible = shells.filter((shell) => shell.compatible === true && !isPs(shell) && !isEmbedded(shell) && !isManual(shell));
+      const powershell = shells.filter((shell) => shell.compatible === true && isPs(shell) && !isManual(shell));
       const others = shells.filter((shell) => shell.compatible !== true);
       const currentValue = optionValue(state.selected ?? {});
       const dirty = draft !== currentValue;
@@ -521,6 +609,11 @@ window.__ModuleLoader__.load({
           h('option', { key: embedded.path, value: optionValue(embedded), disabled: embedded.installed === false },
             `${embedded.label}${embedded.version ? ` · ${embedded.version}` : ''}${embedded.installed === false ? `（${t('embNotInstalled')}）` : ''}`)));
       }
+      // Manually-added paths first (right under embedded) so the user sees the
+      // path they just added.
+      if (manual.length > 0) groups.push(h('optgroup', { key: 'manual', label: t('manualGroup') },
+        manual.map((shell) => h('option', { key: shell.path, value: optionValue(shell) },
+          `${shell.label}${shell.version ? ` · ${shell.version}` : ''}（${t('manualTag')}）`))));
       if (compatible.length > 0) groups.push(h('optgroup', { key: 'compatible', label: t('compatible') },
         compatible.map((shell) => h('option', { key: shell.path, value: optionValue(shell) },
           // Keep the option label terse: `label · version`. The longer
@@ -554,6 +647,38 @@ window.__ModuleLoader__.load({
           h('button', { type: 'button', style: styles.primary, disabled: busy || !dirty, onClick: save }, busy ? t('saving') : t('save')),
           h('button', { type: 'button', style: styles.button, disabled: busy, onClick: reset }, t('reset')),
           h('button', { type: 'button', style: styles.button, disabled: busy, onClick: () => load(false, true) }, t('refresh'))),
+        // Manual path: when auto-detection misses a shell (custom build, odd
+        // install location), let the user type the executable path. Adding puts
+        // it into the dropdown above; you then pick it there and Save.
+        h('div', { style: styles.field },
+          h('label', { style: styles.label, htmlFor: 'shell-switch-manual' }, t('manualLabel')),
+          h('div', { style: styles.row },
+            h('input', {
+              id: 'shell-switch-manual',
+              type: 'text',
+              style: styles.input,
+              placeholder: t('manualPlaceholder'),
+              value: manualPath,
+              disabled: busy,
+              spellCheck: false,
+              onChange: (event) => setManualPath(event.target.value),
+              onKeyDown: (event) => { if (event.key === 'Enter') addManual(); },
+            }),
+            h('button', { type: 'button', style: styles.primary, disabled: busy || manualPath.trim() === '', onClick: addManual }, t('manualUse'))),
+          h('p', { style: styles.hint }, t('manualHint')),
+          // Let the user drop a manually-added path again.
+          manual.length > 0
+            ? h('div', { style: styles.manualList },
+                manual.map((shell) => h('div', { key: shell.path, style: styles.manualItem },
+                  h('span', { style: styles.mono, title: shell.path }, shell.path),
+                  h('button', {
+                    type: 'button',
+                    style: styles.miniRemove,
+                    disabled: busy,
+                    title: t('manualRemove'),
+                    onClick: () => removeManual(shell.path),
+                  }, t('manualRemove')))))
+            : null),
         message !== null ? h('p', { style: styles.message }, message) : null,
         error !== null ? h('p', { style: styles.error }, error) : null,
         // Embedded Niubash status + install/remove/update/rollback.

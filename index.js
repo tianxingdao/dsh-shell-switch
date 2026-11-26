@@ -278,6 +278,7 @@ function readStore() {
   }
   if (storeCache.at === stamp) return storeCache.value;
   let shell = null;
+  let customPaths = [];
   if (stamp !== 0) {
     try {
       const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -289,30 +290,35 @@ function readStore() {
           at: candidate.at ?? parsed?.at,
         };
       }
+      if (Array.isArray(parsed?.customPaths)) {
+        customPaths = parsed.customPaths.filter((p) => typeof p === 'string' && p.length > 0);
+      }
     } catch {
       // A corrupt file behaves like an empty one.
     }
   }
-  storeCache = { at: stamp, value: { shell } };
+  storeCache = { at: stamp, value: { shell, customPaths } };
   return storeCache.value;
 }
 
 /**
  * Merge a patch into the store and persist it.
- * @param {{ shell?: { path: string, distro?: string, at?: string } | null }} patch - fields to replace.
- * @returns {{ shell: { path: string, at?: string } | null }} the new store.
+ * @param {{ shell?: { path: string, distro?: string, at?: string } | null, customPaths?: string[] }} patch - fields to replace.
+ * @returns {{ shell: { path: string, at?: string } | null, customPaths: string[] }} the new store.
  */
 function writeStore(patch) {
   const next = { ...readStore(), ...patch };
-  const payload = next.shell === null || next.shell === undefined
-    ? {}
-    : {
-        shell: {
-          path: next.shell.path,
-          ...typeof next.shell.distro === 'string' && next.shell.distro.length > 0 ? { distro: next.shell.distro } : {},
-          at: next.shell.at ?? new Date().toISOString(),
-        },
-      };
+  const payload = {};
+  if (next.shell !== null && next.shell !== undefined) {
+    payload.shell = {
+      path: next.shell.path,
+      ...typeof next.shell.distro === 'string' && next.shell.distro.length > 0 ? { distro: next.shell.distro } : {},
+      at: next.shell.at ?? new Date().toISOString(),
+    };
+  }
+  if (Array.isArray(next.customPaths) && next.customPaths.length > 0) {
+    payload.customPaths = next.customPaths;
+  }
   const file = selectionFile();
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
@@ -333,6 +339,36 @@ const writeSelection = (shellPath, distro) =>
   });
 /** Forget the shell choice. */
 const clearSelection = () => writeStore({ shell: null });
+
+/** The list of manually-added shell paths. */
+const readCustomPaths = () => readStore().customPaths ?? [];
+
+/**
+ * Add a manual shell path to the picker (idempotent). Does NOT select it; the
+ * user picks it in the dropdown as usual.
+ * @param {string} shellPath - absolute executable path.
+ * @returns {string[]} the new list.
+ */
+function addCustomPath(shellPath) {
+  const current = readCustomPaths();
+  const norm = (p) => String(p).toLowerCase();
+  if (current.some((p) => norm(p) === norm(shellPath))) return current;
+  const next = [...current, shellPath];
+  writeStore({ customPaths: next });
+  return next;
+}
+
+/**
+ * Remove a manual shell path from the picker.
+ * @param {string} shellPath - the path to drop.
+ * @returns {string[]} the new list.
+ */
+function removeCustomPath(shellPath) {
+  const norm = (p) => String(p).toLowerCase();
+  const next = readCustomPaths().filter((p) => norm(p) !== norm(shellPath));
+  writeStore({ customPaths: next });
+  return next;
+}
 
 /** Installed programs whose `InstallLocation` names a shell family. */
 /**
@@ -938,6 +974,20 @@ async function discoverShells(refresh = false) {
     shells.length = 0;
     shells.push(...filtered);
   }
+  // Append manually-added shell paths (from the Settings "add path" field) so
+  // they show up in the picker as normal, selectable options. A path already
+  // detected (same real path) is skipped to avoid a duplicate row.
+  const knownPaths = new Set(shells.map((shell) => String(shell.path).toLowerCase()));
+  for (const rawPath of readCustomPaths()) {
+    let real = rawPath;
+    try { real = fs.realpathSync.native(rawPath); } catch { /* keep literal */ }
+    if (knownPaths.has(String(real).toLowerCase())) continue;
+    const entry = classifyManualShell(real);
+    if (entry === undefined) continue; // path vanished / no longer a shell
+    entry.manual = true;
+    shells.push(entry);
+    knownPaths.add(String(real).toLowerCase());
+  }
   discovery = { at: Date.now(), shells };
   return shells;
 }
@@ -1048,19 +1098,67 @@ function findByPath(shells, candidate, distro) {
     // Store app-execution aliases cannot be resolved (EACCES); match them by
     // their own path, which is what spawn uses.
     const literal = shells.find((shell) => shell.path.toLowerCase() === candidate.toLowerCase() && sameDistro(shell));
-    return literal;
+    if (literal !== undefined) return literal;
+    // Fall through: a manual path that realpath cannot resolve — accept it only
+    // if the file is actually present (a path that does not exist is an error).
+    if (fs.existsSync(candidate)) real = candidate;
+    else return undefined;
   }
-  return (
-    shells.find((shell) => shell.path.toLowerCase() === real.toLowerCase() && sameDistro(shell)) ?? {
-      path: real,
-      id: 'custom',
-      label: path.basename(real),
-      kind: 'bash',
-      compatible: true,
-      source: 'custom',
-      version: '',
+  const hit = shells.find((shell) => shell.path.toLowerCase() === real.toLowerCase() && sameDistro(shell));
+  if (hit !== undefined) return hit;
+  // Manual path not among discovered shells: validate it is a real file and
+  // classify its dialect (bash-family vs PowerShell) so a non-shell or a
+  // non-bash binary is not silently accepted.
+  return classifyManualShell(real);
+}
+
+/**
+ * Classify a manually-entered shell path.
+ *
+ * A manual path bypasses auto-detection, so it must be validated: the file must
+ * exist, and it must be a runnable shell. The dialect is inferred from the
+ * executable name and a cheap `--version` probe, so a `cmd.exe` or a random
+ * binary is rejected rather than treated as bash. Returns a synthetic shell
+ * entry (source `custom`) or `undefined` when the path is not usable.
+ * @param {string} realPath - an existing absolute path.
+ * @returns {Record<string, unknown> | undefined} a shell entry, or undefined.
+ */
+function classifyManualShell(realPath) {
+  const base = path.basename(realPath).toLowerCase();
+  const isPs = /^(pwsh|powershell)(\.exe)?$/.test(base);
+  const looksBash = /(bash|sh|niu)(\.exe)?$/.test(base);
+  // Hard-reject known non-shells even if a probe happens to "succeed".
+  if (/^(cmd|notepad|bash\.exe\.bak)(\.exe)?$/.test(base)) return undefined;
+  // Probe a version to confirm it really runs (guards against a bogus binary).
+  let version = '';
+  let probedVersion = false;
+  try {
+    if (isPs) {
+      const out = execFileSync(realPath, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.ToString()'], {
+        encoding: 'utf8', windowsHide: true, timeout: 4000, maxBuffer: 64 * 1024,
+      });
+      version = (out.trim().split(/\r?\n/).pop() ?? '').trim();
+      probedVersion = /\d+\.\d+/.test(version);
+    } else {
+      const out = execFileSync(realPath, ['--version'], {
+        encoding: 'utf8', windowsHide: true, timeout: 4000, maxBuffer: 64 * 1024,
+      });
+      const m = /version\s+([0-9][^\s(]*)/i.exec(out)?.[1] ?? /(\d+\.\d+(?:\.\d+)?)/.exec(out)?.[1];
+      if (m !== undefined) { version = m; probedVersion = true; }
+      else version = (out.split(/\r?\n/)[0] ?? '').trim();
     }
-  );
+  } catch {
+    // If the name does not look like a shell AND the probe failed, refuse it.
+    if (!isPs && !looksBash) return undefined;
+  }
+  if (isPs) {
+    return { path: realPath, id: 'custom-pwsh', label: base, kind: 'powershell', dialect: 'powershell', compatible: true, source: 'custom', version };
+  }
+  // bash-family: accept a bash-ish NAME, or a binary whose --version had a
+  // real version number. A random binary that neither looks like bash nor
+  // reports a version is refused.
+  if (!looksBash && !probedVersion) return undefined;
+  return { path: realPath, id: 'custom', label: base, kind: 'bash', compatible: true, source: 'custom', version };
 }
 
 /**
@@ -1582,6 +1680,7 @@ async function statePayload(ctx, config, refresh, settle = false) {
           },
     source: decision.source,
     warning: decision.warning ?? null,
+    customPaths: readCustomPaths(),
     sandbox: policy ?? null,
     settingsFile: selectionFile(),
     defaults: { shell: String(valueOf(config.shell, DEFAULT_SHELL) ?? DEFAULT_SHELL) },
@@ -1710,8 +1809,17 @@ function registerRoutes(ctx, config) {
             return json(res, 200, await statePayload(ctx, config, false));
           }
           const shells = await discoverShells(true);
-          const hit = findByPath(shells, body?.path, body?.distro);
-          if (hit === undefined) return json(res, 400, { ok: false, error: `未找到该 shell：${String(body?.path ?? '')}` });
+          const customPath = typeof body?.path === 'string' ? body.path.trim() : '';
+          const hit = findByPath(shells, customPath, body?.distro);
+          if (hit === undefined) {
+            const exists = customPath.length > 0 && fs.existsSync(customPath);
+            return json(res, 400, {
+              ok: false,
+              error: exists
+                ? `该文件不是可用的 shell（不是 bash 方言，也不是 PowerShell）：${customPath}`
+                : `未找到该 shell（路径不存在）：${customPath}`,
+            });
+          }
           if (hit.compatible !== true) {
             return json(res, 400, { ok: false, error: `${hit.label} 不是 bash 方言，无法执行 bash 命令` });
           }
@@ -1719,7 +1827,50 @@ function registerRoutes(ctx, config) {
           refilterTools();
           return json(res, 200, await statePayload(ctx, config, false));
         }
-        // --- Background sessions API (used by the sidebar panel) ---
+        // Add or remove a manually-entered shell path from the picker. Adding
+        // validates the path (exists + is a shell) but does NOT select it — the
+        // user then chooses it in the dropdown and saves.
+        if (req.method === 'POST' && tail === '/custom/add') {
+          if (!String(req.headers['content-type'] ?? '').toLowerCase().includes('application/json')) {
+            return json(res, 415, { ok: false, error: 'content-type must be application/json' });
+          }
+          let body;
+          try {
+            body = await readJson(req);
+          } catch {
+            return json(res, 400, { ok: false, error: 'invalid JSON body' });
+          }
+          const rawPath = typeof body?.path === 'string' ? body.path.trim() : '';
+          if (rawPath.length === 0) return json(res, 400, { ok: false, error: '路径为空' });
+          let real = rawPath;
+          try { real = fs.realpathSync.native(rawPath); } catch { /* keep literal */ }
+          if (!fs.existsSync(real)) {
+            return json(res, 400, { ok: false, error: `路径不存在：${rawPath}` });
+          }
+          const entry = classifyManualShell(real);
+          if (entry === undefined) {
+            return json(res, 400, { ok: false, error: `该文件不是可用的 shell（不是 bash 方言，也不是 PowerShell）：${rawPath}` });
+          }
+          addCustomPath(real);
+          discovery = { at: 0, shells: [] }; // force re-discovery so it appears
+          return json(res, 200, await statePayload(ctx, config, true));
+        }
+        if (req.method === 'POST' && tail === '/custom/remove') {
+          if (!String(req.headers['content-type'] ?? '').toLowerCase().includes('application/json')) {
+            return json(res, 415, { ok: false, error: 'content-type must be application/json' });
+          }
+          let body;
+          try {
+            body = await readJson(req);
+          } catch {
+            return json(res, 400, { ok: false, error: 'invalid JSON body' });
+          }
+          const rawPath = typeof body?.path === 'string' ? body.path.trim() : '';
+          if (rawPath.length === 0) return json(res, 400, { ok: false, error: '路径为空' });
+          removeCustomPath(rawPath);
+          discovery = { at: 0, shells: [] };
+          return json(res, 200, await statePayload(ctx, config, true));
+        }
         if (backgroundSessions === null) {
           return json(res, 404, { ok: false, error: 'background sessions are disabled' });
         }
