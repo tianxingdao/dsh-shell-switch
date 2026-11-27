@@ -152,6 +152,16 @@ window.__ModuleLoader__.load({
       bgLoadFailed: 'Could not read the job list',
       bgKillFailed: 'Stop request failed',
       bgStarted: 'started',
+      cardCommand: 'Command',
+      cardOutput: 'Output',
+      cardRunning: 'Running',
+      cardExit: 'exit',
+      cardInspect: 'Inspect',
+      cardNoOutput: '(no output)',
+      bgHideQuick: 'Hide quick one-shot jobs',
+      bgQuickHidden: 'quick one-shot job(s) hidden',
+      bgQuickShow: 'Show',
+      bgQuickOnly: 'Only quick one-shot commands here. Long-running services (java, node, go, python, web) appear once they start.',
     };
 
     /** Simplified Chinese copy for the Shell selector page. */
@@ -275,6 +285,16 @@ window.__ModuleLoader__.load({
       bgLoadFailed: '读取任务列表失败',
       bgKillFailed: '停止请求失败',
       bgStarted: '启动于',
+      cardCommand: '命令',
+      cardOutput: '输出',
+      cardRunning: '运行中',
+      cardExit: '退出码',
+      cardInspect: '检查调用',
+      cardNoOutput: '（无输出）',
+      bgHideQuick: '隐藏快速结束的一次性命令',
+      bgQuickHidden: '条快速结束的任务已隐藏',
+      bgQuickShow: '显示',
+      bgQuickOnly: '当前只有快速结束的一次性命令。java / node / go / python / web 这类长时服务启动后会出现在这里。',
     };
 
     /**
@@ -823,6 +843,143 @@ window.__ModuleLoader__.load({
     // --- Background jobs panel (rendered inside dsh-better-sidebar) --------
 
     /** Extra styles for the jobs panel. */
+    /** Parse the actual shell identity recorded by the Host executor. */
+    function executionFacts(text) {
+      const source = String(text ?? '');
+      return {
+        label: /^\[shell: ([^\]]+)\]$/m.exec(source)?.[1],
+        path: /^\[shell-path: ([^\]]*)\]$/m.exec(source)?.[1],
+      };
+    }
+
+    /** The execution markers belong in the badge, not in the output body. */
+    function stripExecutionFacts(text) {
+      return String(text ?? '').split('\n')
+        .filter((line) => !/^\[shell: [^\]]+\]$/.test(line) && !/^\[shell-path: [^\]]*\]$/.test(line))
+        .join('\n');
+    }
+
+    /** Parse the stock final exit/signal marker without changing its contract. */
+    function executionExit(text, settled, isError) {
+      const signal = /(?:^|\n)\[killed by signal: ([^\]\n]+)\]\s*$/.exec(text);
+      if (signal !== null) return { output: text.slice(0, signal.index), signal: signal[1], exitCode: undefined };
+      const exit = /(?:^|\n)\[exit code: (\d+)\]\s*$/.exec(text);
+      if (exit !== null) return { output: text.slice(0, exit.index), signal: undefined, exitCode: Number(exit[1]) };
+      return { output: text, signal: undefined, exitCode: settled && !isError ? 0 : undefined };
+    }
+
+    function cardDisplayCwd(workdir, sessionCwd) {
+      const base = workdir || sessionCwd || '';
+      if (!workdir || !sessionCwd || /^(?:[A-Za-z]:|[/\\])/.test(workdir)) return base;
+      return `${sessionCwd.replace(/[/\\]+$/, '')}${sessionCwd.includes('\\') ? '\\' : '/'}${workdir}`;
+    }
+
+    const toolCardStyles = {
+      root: { padding: '3px 0', color: 'var(--dsw-alias-label-secondary)', fontSize: '12px', lineHeight: '20px' },
+      row: { display: 'flex', alignItems: 'center', gap: '7px', minWidth: 0, cursor: 'pointer', userSelect: 'none' },
+      chevron: { width: '12px', flex: 'none', color: 'var(--dsw-alias-label-secondary)', fontFamily: 'monospace' },
+      tool: { flex: 'none', color: 'var(--dsw-alias-label-primary)', fontWeight: 500 },
+      summary: { minWidth: 0, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+      badge: { flex: 'none', maxWidth: '260px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', padding: '0 7px', borderRadius: '999px', border: '1px solid var(--dsw-alias-border-l1)', color: 'var(--dsw-alias-label-secondary)', background: 'var(--dsw-alias-bg-layer-1)', fontSize: '11px', lineHeight: '18px' },
+      exit: { flex: 'none', fontFamily: 'ui-monospace, monospace', fontSize: '11px', lineHeight: '18px' },
+      body: { margin: '5px 0 7px 19px', overflow: 'hidden', border: '1px solid var(--dsw-alias-border-l1)', borderRadius: '8px', background: 'var(--dsw-alias-bg-layer-1)' },
+      meta: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', padding: '6px 10px', borderBottom: '1px solid var(--dsw-alias-border-l1)', color: 'var(--dsw-alias-label-secondary)', fontSize: '11px' },
+      mono: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', wordBreak: 'break-all' },
+      sectionLabel: { padding: '6px 10px 0', color: 'var(--dsw-alias-label-secondary)', fontSize: '11px' },
+      pre: { margin: 0, padding: '7px 10px 9px', whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: 'var(--dsw-alias-label-primary)', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: '12px', lineHeight: '18px' },
+      output: { borderTop: '1px solid var(--dsw-alias-border-l1)', maxHeight: '360px', overflow: 'auto' },
+      actions: { display: 'flex', gap: '6px', padding: '6px 10px', borderTop: '1px solid var(--dsw-alias-border-l1)' },
+      action: { padding: '2px 8px', border: '1px solid var(--dsw-alias-border-l1)', borderRadius: '6px', background: 'transparent', color: 'var(--dsw-alias-label-secondary)', cursor: 'pointer', fontSize: '11px' },
+    };
+
+    /**
+     * Shell tool row with the actual execution identity, cwd and exit status.
+     * The stock card remains responsible for every other tool; this keyed view
+     * is registered only for bash/pwsh.
+     */
+    function ShellToolCard(props) {
+      const t = props.t;
+      const block = props.block ?? {};
+      const settled = props.phase === 'result';
+      const call = block.call ?? block;
+      let args = call.args && typeof call.args === 'object' ? call.args : null;
+      if (args === null && typeof call.argsRaw === 'string') {
+        try {
+          const parsed = JSON.parse(call.argsRaw);
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) args = parsed;
+        } catch { /* preparing args may be incomplete */ }
+      }
+      const command = typeof args?.command === 'string' ? args.command : '';
+      const description = typeof args?.description === 'string' ? args.description : '';
+      const raw = (block.content ?? []).map((part) => part.type === 'text' ? part.text : '').filter(Boolean).join('\n');
+      const facts = executionFacts(raw);
+      const isError = block.isError === true || block.error !== undefined;
+      const tail = executionExit(stripExecutionFacts(raw), settled, isError);
+      const cwd = cardDisplayCwd(args?.workdir, props.cwd);
+      const disclosure = props.useDisclosure();
+      const [fallbackOpen, setFallbackOpen] = React.useState(false);
+      const expanded = disclosure?.expanded ?? fallbackOpen;
+      const toggle = disclosure?.toggle ?? (() => setFallbackOpen((value) => !value));
+      const [copied, setCopied] = React.useState('');
+      const copy = async (key, text, event) => {
+        event.stopPropagation();
+        try {
+          await navigator.clipboard.writeText(text);
+          setCopied(key);
+        } catch { /* clipboard may be unavailable */ }
+      };
+      const expandable = command !== '' || raw !== '';
+      const open = expanded && expandable;
+      const failed = isError || tail.signal !== undefined || (tail.exitCode !== undefined && tail.exitCode !== 0);
+      const exitLabel = tail.signal !== undefined ? tail.signal : tail.exitCode !== undefined ? `${t('cardExit')} ${tail.exitCode}` : '';
+      const shellBadge = facts.label
+        ? h('span', { key: 'shell', style: toolCardStyles.badge, title: facts.path || facts.label }, facts.label)
+        : null;
+      const actionButton = (key, label, text) => h('button', {
+        key, type: 'button', style: toolCardStyles.action,
+        onClick: (event) => copy(key, text, event),
+      }, copied === key ? t('bgCopied') : label);
+
+      return h('div', { style: toolCardStyles.root },
+        h('div', {
+          style: toolCardStyles.row,
+          role: expandable ? 'button' : undefined,
+          tabIndex: expandable ? 0 : undefined,
+          'aria-expanded': expandable ? open : undefined,
+          onClick: expandable ? toggle : undefined,
+          onKeyDown: expandable ? (event) => {
+            if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); toggle(); }
+          } : undefined,
+        },
+          h('span', { style: toolCardStyles.chevron }, expandable ? (open ? '▾' : '▸') : '›'),
+          h('span', { style: toolCardStyles.tool }, props.toolName),
+          shellBadge,
+          h('span', { style: { ...toolCardStyles.summary, ...(failed ? { color: 'var(--dsw-alias-state-error-primary)' } : {}) } },
+            description || (!settled ? t('cardRunning') : command)),
+          exitLabel ? h('span', { style: { ...toolCardStyles.exit, color: failed ? 'var(--dsw-alias-state-error-primary)' : 'var(--dsw-alias-label-secondary)' } }, exitLabel) : null),
+        open
+          ? h('div', { style: toolCardStyles.body },
+            h('div', { style: toolCardStyles.meta },
+              shellBadge,
+              cwd ? h('span', { style: toolCardStyles.mono, title: cwd }, cwd) : null,
+              facts.path ? h('span', { style: toolCardStyles.mono, title: facts.path }, facts.path) : null),
+            command ? h('div', null,
+              h('div', { style: toolCardStyles.sectionLabel }, t('cardCommand')),
+              h('pre', { style: toolCardStyles.pre }, command)) : null,
+            settled ? h('div', { style: toolCardStyles.output },
+              h('div', { style: toolCardStyles.sectionLabel }, t('cardOutput')),
+              h('pre', { style: { ...toolCardStyles.pre, ...(isError ? { color: 'var(--dsw-alias-state-error-primary)' } : {}) } },
+                tail.output.trim() === '' ? t('cardNoOutput') : tail.output.replace(/\n+$/, ''))) : null,
+            h('div', { style: toolCardStyles.actions },
+              command ? actionButton('command', `${t('bgCopy')} ${t('cardCommand')}`, command) : null,
+              settled ? actionButton('output', `${t('bgCopy')} ${t('cardOutput')}`, tail.output) : null,
+              typeof props.inspect === 'function' ? h('button', {
+                type: 'button', style: toolCardStyles.action,
+                onClick: (event) => { event.stopPropagation(); props.inspect(); },
+              }, t('cardInspect')) : null))
+          : null);
+    }
+
     const jobStyles = {
       root: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, fontSize: '12px', color: 'var(--dsw-alias-label-primary)' },
       toolbar: { display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 10px', borderBottom: '1px solid var(--dsw-alias-border-l1)', flexWrap: 'wrap' },
@@ -1206,6 +1363,24 @@ window.__ModuleLoader__.load({
       const [logFull, setLogFull] = React.useState(false); // fullscreen modal
       const [busy, setBusy] = React.useState({});
       const [autoCleanup, setAutoCleanup] = React.useState({ enabled: false, keep: 20 });
+      // Quick one-shot commands (finished successfully within seconds) are noise
+      // for this panel: it exists to watch long-running services. Hidden by
+      // default, and the choice sticks across sessions.
+      const [showQuick, setShowQuick] = React.useState(() => {
+        try { return window.localStorage.getItem('dsh-shell-switch:showQuick') === '1'; } catch { return false; }
+      });
+      const toggleShowQuick = () => setShowQuick((value) => {
+        const next = !value;
+        try { window.localStorage.setItem('dsh-shell-switch:showQuick', next ? '1' : '0'); } catch { /* private mode */ }
+        return next;
+      });
+      /** Split a job list into what the panel shows and what it hides. */
+      const splitQuick = (jobs) => {
+        if (!Array.isArray(jobs)) return { visible: [], hidden: 0 };
+        if (showQuick) return { visible: jobs, hidden: 0 };
+        const visible = jobs.filter((job) => job.quickSuccess !== true);
+        return { visible, hidden: jobs.length - visible.length };
+      };
       const collapsed = React.useRef(new Set());
       // Per-job read offsets live in a ref, not state: advancing the offset must
       // not re-run the polling effect (which state would, causing tight refetch
@@ -1448,9 +1623,15 @@ window.__ModuleLoader__.load({
 
       const total = data === null ? 0 : (data.jobs ? data.jobs.length : (data.total ?? 0));
       const body = [];
+      let hiddenQuick = 0;
+      let visibleTotal = 0;
       if (data !== null) {
         if (view === 'all' && Array.isArray(data.jobs)) {
-          const byOwner = groupByOwner(data.jobs);
+          const split = splitQuick(data.jobs);
+          hiddenQuick = split.hidden;
+          const visible = split.visible;
+          visibleTotal = visible.length;
+          const byOwner = groupByOwner(visible);
           const mine = byOwner.get(sessionId) ?? [];
           byOwner.delete(sessionId);
           if (mine.length > 0) body.push(renderGroup('this', t('bgThis'), mine, { current: true, cleanupSession: sessionId }));
@@ -1460,20 +1641,25 @@ window.__ModuleLoader__.load({
             const title = owner ? sessionLabel(jobs[0]) || shortSession(owner) : t('bgNoOwner');
             body.push(renderGroup(`g${index}`, title, jobs, { collapsible: true, ownerId: owner, cleanupSession: owner }));
           }
-          if (total === 0) body.push(h('div', { key: 'empty', style: jobStyles.empty }, t('bgEmpty')));
+          if (visible.length === 0) {
+            body.push(h('div', { key: 'empty', style: jobStyles.empty }, hiddenQuick > 0 ? t('bgQuickOnly') : t('bgEmpty')));
+          }
         } else if (view === 'session') {
           // This-conversation view shows ONLY this conversation's jobs. Other
           // conversations live in the 全部 view — earlier they leaked in here,
           // which read as "本会话 shows other sessions' jobs".
-          const active = Array.isArray(data.active) ? data.active : [];
+          const split = splitQuick(Array.isArray(data.active) ? data.active : []);
+          const active = split.visible;
+          hiddenQuick = split.hidden;
+          visibleTotal = active.length;
           if (active.length === 0) {
-            body.push(h('div', { key: 'empty', style: jobStyles.empty }, t('bgEmptySession')));
+            body.push(h('div', { key: 'empty', style: jobStyles.empty }, hiddenQuick > 0 ? t('bgQuickOnly') : t('bgEmptySession')));
           } else {
             body.push(renderGroup('this', t('bgThis'), active, { current: true, cleanupSession: sessionId }));
           }
           // Tell the reader when other conversations have jobs they can see in 全部.
-          const otherCount = (Array.isArray(data.groups) ? data.groups : [])
-            .reduce((sum, g) => sum + ((g.jobs ?? []).length), 0);
+          const otherCount = splitQuick((Array.isArray(data.groups) ? data.groups : [])
+            .flatMap((g) => g.jobs ?? [])).visible.length;
           if (otherCount > 0) {
             body.push(h('div', {
               key: 'other-hint',
@@ -1490,7 +1676,7 @@ window.__ModuleLoader__.load({
             h('button', { type: 'button', style: jobStyles.segBtn(view === 'session'), onClick: () => setView('session') }, t('bgThis')),
             h('button', { type: 'button', style: jobStyles.segBtn(view === 'all'), onClick: () => setView('all') }, t('bgAll'))),
           h('span', { style: jobStyles.spacer }),
-          h('span', { style: jobStyles.statusText }, `${total}`),
+          h('span', { style: jobStyles.statusText }, data === null ? `${total}` : `${visibleTotal}`),
           view === 'session'
             ? h('button', { type: 'button', style: jobStyles.minibtn, title: t('bgCleanupHint'), onClick: () => cleanupStopped(sessionId) }, t('bgCleanupStopped'))
             : h('button', { type: 'button', style: jobStyles.minibtn, title: t('bgCleanupHint'), onClick: () => cleanupStopped() }, t('bgCleanupStopped')),
@@ -1513,6 +1699,17 @@ window.__ModuleLoader__.load({
               }))
             : null),
         error !== null ? h('div', { style: jobStyles.err }, error) : null,
+        // Quick-command filter: this panel is for watching long-running
+        // services, so one-shot commands that already succeeded are folded away.
+        h('div', { style: jobStyles.autoRow },
+          h('label', { style: jobStyles.autoLabel, title: t('bgQuickOnly') },
+            h('input', { type: 'checkbox', checked: showQuick, onChange: toggleShowQuick }),
+            h('span', null, t('bgHideQuick'))),
+          hiddenQuick > 0
+            ? h('span', { style: jobStyles.autoLabel },
+              h('span', null, `${hiddenQuick} ${t('bgQuickHidden')}`),
+              h('button', { type: 'button', style: jobStyles.minibtn, onClick: () => toggleShowQuick() }, t('bgQuickShow')))
+            : null),
         h('div', { style: jobStyles.scroller }, body));
     }
 
@@ -1529,6 +1726,14 @@ window.__ModuleLoader__.load({
           locale: NS,
           inject: () => ({ t }),
         }, ShellSection));
+        // Replace only the shell tool rows. Other tools keep the host's own
+        // cards. Priority -1 intentionally shadows the shipped bash/pwsh view.
+        for (const toolKey of ['bash', 'pwsh']) {
+          ctx.slots.inject('tool.call.toolview', () => ctx.slots.register(
+            { name: 'tool.call.toolview', key: toolKey, priority: -1 },
+            (slotProps) => h(ShellToolCard, { ...slotProps, t }),
+          ));
+        }
         // Register the background-jobs page into dsh-better-sidebar. That
         // plugin is OPTIONAL, so `betterSidebar` is not declared in this
         // plugin's module-level `inject` (a missing service would block the

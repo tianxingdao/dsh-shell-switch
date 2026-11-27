@@ -1438,6 +1438,27 @@ function bashExtraPath(bashPath) {
  */
 let ShellSwitchExecutor = null;
 
+/**
+ * Attach the actual execution identity to one result. The stock renderer keeps
+ * stdout ahead of its final exit marker, so the pill still parses; the Client
+ * card strips these two lines and renders them as a badge instead. Recording
+ * the captured shell here (rather than reading Settings later) keeps history
+ * correct when the selection changes while a command is running.
+ */
+function markExecutionShell(result, shell) {
+  const label = String(shell?.label ?? shell?.path ?? 'shell').replace(/[\]\r\n]/g, ' ');
+  const shellPath = String(shell?.path ?? '').replace(/[\]\r\n]/g, ' ');
+  const marker = `[shell: ${label}]\n[shell-path: ${shellPath}]`;
+  const text = String(result.stdout?.text ?? '');
+  return {
+    ...result,
+    stdout: {
+      ...result.stdout,
+      text: text.length === 0 ? marker : `${text}${text.endsWith('\n') ? '' : '\n'}${marker}`,
+    },
+  };
+}
+
 /** Build the executor class once the shipped package is available. */
 async function shellSwitchExecutor() {
   if (ShellSwitchExecutor !== null) return ShellSwitchExecutor;
@@ -1492,8 +1513,8 @@ async function shellSwitchExecutor() {
      * @param {AbortSignal} [signal] - cancellation of confinement preparation.
      * @returns {Promise<object>} the confined argv and classification facts.
      */
-    async confine(command, policy, signal, workdir) {
-      const { shell } = await this.current();
+    async confine(command, policy, signal, workdir, selectedShell) {
+      const shell = selectedShell ?? (await this.current()).shell;
       return this.ctx.sandbox.confine(this.argvFor(shell, command, policy, workdir), policy, signal);
     }
 
@@ -1541,17 +1562,16 @@ async function shellSwitchExecutor() {
       // A PowerShell command travels on stdin (base64 UTF-8 source), so the
       // executed spec carries that payload; bash and WSL keep the command in
       // argv and leave stdin alone.
-      const { shell: probe } = await this.current();
-      const runSpec = isPowerShell(probe)
+      const { shell } = await this.current();
+      const runSpec = isPowerShell(shell)
         ? { ...spec, ...this.powershellSpec(spec) }
         : spec;
       if (policy?.mode === 'danger-full-access') {
-        const { shell } = await this.current();
         const execution = await this.executeArgv(runSpec, this.argvFor(shell, spec.command, policy, spec.workdir));
-        return SandboxBashExecutor.decorateResult(execution, (result) => ({
+        return SandboxBashExecutor.decorateResult(execution, (result) => markExecutionShell({
           ...result,
           sandbox: { mode: 'danger-full-access', denied: false },
-        }));
+        }, shell));
       }
       // Drive the confined path here instead of in the base class: the base
       // calls its own `confine(command, policy, signal)` with no working
@@ -1562,7 +1582,7 @@ async function shellSwitchExecutor() {
       const execution = await this.executeArgv(
         runSpec,
         async (signal) => {
-          const prepared = await this.confine(spec.command, { ...policy, mode }, signal, spec.workdir);
+          const prepared = await this.confine(spec.command, { ...policy, mode }, signal, spec.workdir, shell);
           signal.throwIfAborted();
           confined = prepared;
           return prepared.argv;
@@ -1583,17 +1603,17 @@ async function shellSwitchExecutor() {
       return SandboxBashExecutor.decorateResult(
         execution,
         (result) => {
-          if (confined === undefined) return { ...result, sandbox: { mode, denied: false } };
+          if (confined === undefined) return markExecutionShell({ ...result, sandbox: { mode, denied: false } }, shell);
           const runnerFailure = classifyRunnerFailure(result.exitCode, result.stderr.text, confined.runnerFailureRules);
           if (runnerFailure !== undefined) throw new SandboxUnavailableError(mode, runnerFailure.detail);
-          return {
+          return markExecutionShell({
             ...result,
             sandbox: {
               mode,
               denied: classifyDenial(result, confined.denialSignatures),
               enforcement: confined.enforcement,
             },
-          };
+          }, shell);
         },
         (error) => {
           if (spec.signal?.aborted === true) spec.signal.throwIfAborted();

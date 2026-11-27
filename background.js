@@ -36,6 +36,14 @@ const DEFAULT_MAX_LOG_BYTES = 8 * 1024 * 1024;
 const DEFAULT_MAX_JOBS = 50;
 /** Auto-cleanup keeps this many newest STOPPED jobs; older ones are deleted. */
 const DEFAULT_AUTO_CLEANUP_KEEP = 50;
+/**
+ * A job that exited successfully within this window is a one-shot command that
+ * should have been a foreground `bash` call; the panel hides those by default so
+ * the list stays a view of real long-running services. Failures are never
+ * hidden: a server that dies after two seconds is exactly what the user needs
+ * to see.
+ */
+const QUICK_SUCCESS_MS = 15_000;
 /** How often the liveness sweep re-checks a running job's pid. */
 const SWEEP_MS = 4000;
 
@@ -708,6 +716,9 @@ export class BackgroundSessions {
     // `adopted` for anything that cares.
     const adopted = record.status === 'orphan';
     const status = adopted ? 'running' : record.status;
+    const durationMs = record.endedAt === undefined
+      ? Math.max(0, Date.now() - (record.startedAt ?? Date.now()))
+      : Math.max(0, record.endedAt - (record.startedAt ?? record.endedAt));
     return {
       id: record.id,
       kind: record.kind,
@@ -720,6 +731,10 @@ export class BackgroundSessions {
       pid: record.pid,
       status,
       adopted,
+      durationMs,
+      // A one-shot command that already succeeded: hidden by default in the
+      // panel (a quick FAILURE stays visible — that is a real signal).
+      quickSuccess: status === 'exited' && (record.exitCode ?? 0) === 0 && durationMs <= QUICK_SUCCESS_MS,
       exitCode: record.exitCode ?? null,
       signal: record.signal ?? null,
       startedAt: record.startedAt,

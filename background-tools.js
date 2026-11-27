@@ -35,8 +35,11 @@ export function buildBackgroundTools(deps) {
   const bgStart = defineTool({
     name: 'bg_start',
     description:
-      'Start a long-running command as a detached background process and return its job id immediately. '
-      + 'The process keeps running after this tool call ends (and after the harness restarts) — use it for dev servers, watchers, and daemons. '
+      'Start a LONG-RUNNING command as a detached background process and return its job id immediately. '
+      + 'The process keeps running after this tool call ends (and after the harness restarts) — use it for dev servers, watchers, and daemons '
+      + '(java/node/go/python/web apps, `npm run dev`, `go run`, `uvicorn`, `docker compose up`, tail -f). '
+      + 'Do NOT use it for one-shot commands that finish on their own (git, npm install, builds, tests, echo, curl, file edits): run those with `bash`, '
+      + 'which returns their output directly. A command that ends within seconds pollutes the background list and gives you nothing that a foreground run would not. '
       + 'The command runs through the shell currently selected in Settings (bash-family, WSL, or PowerShell syntax accordingly). '
       + 'NOTE: the process is detached and is NOT confined by the session sandbox; it runs with your user privileges. '
       + 'Read its output with bg_output, stop it with bg_kill.',
