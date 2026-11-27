@@ -28,6 +28,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { BackgroundSessions, DEFAULT_MAX_JOBS, DEFAULT_MAX_LOG_BYTES, DEFAULT_AUTO_CLEANUP_KEEP } from './background.js';
 import { buildBackgroundTools } from './background-tools.js';
+import { installTerminalIntegration, terminalPathForShell } from './terminal.js';
 import {
   assetFor as embeddedAssetFor,
   embeddedInstalled,
@@ -128,6 +129,8 @@ const z = await schemastery();
 
 /** The background-session manager, created once per row apply and shared. */
 let backgroundSessions = null;
+// True while the optional terminal-controller decoration is installed.
+let terminalControllerIntegrated = false;
 /** Lazily-loaded DSH tool-definition helpers for the `bg_*` tools. */
 let toolKitPromise;
 function toolKit() {
@@ -148,12 +151,15 @@ function toolKit() {
 function backgroundConfig(config) {
   const raw = valueOf(config?.background, undefined);
   const inner = raw !== null && typeof raw === 'object' ? raw : {};
+  const saved = readStore();
   return {
     enabled: valueOf(inner.enabled, true) !== false,
     maxLogBytes: Number(valueOf(inner.maxLogBytes, DEFAULT_MAX_LOG_BYTES)),
     maxJobs: Number(valueOf(inner.maxJobs, DEFAULT_MAX_JOBS)),
-    autoCleanup: valueOf(inner.autoCleanup, false) === true,
-    autoCleanupKeep: Number(valueOf(inner.autoCleanupKeep, DEFAULT_AUTO_CLEANUP_KEEP)),
+    // Runtime panel choices override Config and survive a restart. With no
+    // saved choice, auto-cleanup defaults on (50 newest stopped jobs, global).
+    autoCleanup: saved.autoCleanup ?? (valueOf(inner.autoCleanup, true) !== false),
+    autoCleanupKeep: saved.autoCleanupKeep ?? Number(valueOf(inner.autoCleanupKeep, DEFAULT_AUTO_CLEANUP_KEEP)),
   };
 }
 
@@ -184,7 +190,7 @@ export const Config = z.object({
     /** How many settled jobs to retain; oldest pruned first. */
     maxJobs: z.number().default(DEFAULT_MAX_JOBS),
     /** Auto-delete old STOPPED jobs; when on, keep only `autoCleanupKeep`. */
-    autoCleanup: z.boolean().default(false),
+    autoCleanup: z.boolean().default(true),
     /** How many newest stopped jobs auto-cleanup keeps. */
     autoCleanupKeep: z.number().default(DEFAULT_AUTO_CLEANUP_KEEP),
   }).default({}),
@@ -279,6 +285,9 @@ function readStore() {
   if (storeCache.at === stamp) return storeCache.value;
   let shell = null;
   let customPaths = [];
+  let followTerminal = true;
+  let autoCleanup;
+  let autoCleanupKeep;
   if (stamp !== 0) {
     try {
       const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -293,11 +302,16 @@ function readStore() {
       if (Array.isArray(parsed?.customPaths)) {
         customPaths = parsed.customPaths.filter((p) => typeof p === 'string' && p.length > 0);
       }
+      // Absent means enabled for existing installs; only an explicit false
+      // disables terminal following.
+      if (parsed?.followTerminal === false) followTerminal = false;
+      if (typeof parsed?.autoCleanup === 'boolean') autoCleanup = parsed.autoCleanup;
+      if (Number.isFinite(parsed?.autoCleanupKeep)) autoCleanupKeep = Math.max(0, Math.floor(parsed.autoCleanupKeep));
     } catch {
       // A corrupt file behaves like an empty one.
     }
   }
-  storeCache = { at: stamp, value: { shell, customPaths } };
+  storeCache = { at: stamp, value: { shell, customPaths, followTerminal, autoCleanup, autoCleanupKeep } };
   return storeCache.value;
 }
 
@@ -319,6 +333,9 @@ function writeStore(patch) {
   if (Array.isArray(next.customPaths) && next.customPaths.length > 0) {
     payload.customPaths = next.customPaths;
   }
+  payload.followTerminal = next.followTerminal !== false;
+  if (typeof next.autoCleanup === 'boolean') payload.autoCleanup = next.autoCleanup;
+  if (Number.isFinite(next.autoCleanupKeep)) payload.autoCleanupKeep = Math.max(0, Math.floor(next.autoCleanupKeep));
   const file = selectionFile();
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
@@ -1681,6 +1698,11 @@ async function statePayload(ctx, config, refresh, settle = false) {
     source: decision.source,
     warning: decision.warning ?? null,
     customPaths: readCustomPaths(),
+    terminal: {
+      controller: terminalControllerIntegrated,
+      follow: readStore().followTerminal !== false,
+      selectedPath: decision.shell === undefined ? null : terminalPathForShell(decision.shell),
+    },
     sandbox: policy ?? null,
     settingsFile: selectionFile(),
     defaults: { shell: String(valueOf(config.shell, DEFAULT_SHELL) ?? DEFAULT_SHELL) },
@@ -1871,6 +1893,22 @@ function registerRoutes(ctx, config) {
           discovery = { at: 0, shells: [] };
           return json(res, 200, await statePayload(ctx, config, true));
         }
+        if (req.method === 'POST' && tail === '/terminal/follow') {
+          if (!String(req.headers['content-type'] ?? '').toLowerCase().includes('application/json')) {
+            return json(res, 415, { ok: false, error: 'content-type must be application/json' });
+          }
+          let body;
+          try {
+            body = await readJson(req);
+          } catch {
+            return json(res, 400, { ok: false, error: 'invalid JSON body' });
+          }
+          if (typeof body?.follow !== 'boolean') {
+            return json(res, 400, { ok: false, error: 'follow must be a boolean' });
+          }
+          writeStore({ followTerminal: body.follow });
+          return json(res, 200, await statePayload(ctx, config, false));
+        }
         if (backgroundSessions === null) {
           return json(res, 404, { ok: false, error: 'background sessions are disabled' });
         }
@@ -1941,6 +1979,7 @@ function registerRoutes(ctx, config) {
             body = {};
           }
           const applied = backgroundSessions.setAutoCleanup({ enabled: body?.enabled, keep: body?.keep });
+          writeStore({ autoCleanup: applied.enabled, autoCleanupKeep: applied.keep });
           return json(res, 200, { ok: true, ...applied });
         }
         return json(res, 404, { ok: false, error: 'not found' });
@@ -2287,6 +2326,25 @@ export function apply(ctx, config) {
     };
   }, 'dsh-shell-switch: per-agent bash tool');
   ctx.effect(() => registerRoutes(ctx, config), 'dsh-shell-switch: settings API');
+  // Optional better-sidebar / official-terminal integration. The controller is
+  // decorated in memory only: no other plugin's files or Config are changed.
+  ctx.inject(['terminalController'], (serviceCtx) => {
+    serviceCtx.effect(() => {
+      const controller = serviceCtx.terminalController ?? serviceCtx.get?.('terminalController');
+      if (typeof controller?.shells !== 'function' || typeof controller?.create !== 'function') return () => {};
+      const restore = installTerminalIntegration(controller, {
+        discover: () => discoverShells(false),
+        current: async () => resolveShell(config, await discoverShells(false)).shell,
+        following: () => readStore().followTerminal !== false,
+      });
+      terminalControllerIntegrated = true;
+      debug('terminal-controller-integrated');
+      return () => {
+        terminalControllerIntegrated = false;
+        try { restore(); } catch { /* best effort during teardown */ }
+      };
+    }, 'dsh-shell-switch: terminal controller integration');
+  });
   // Warm the registry scan and the version cache at mount so the first visit to
   // the Settings page is answered from cache instead of waiting for them.
   ctx.effect(() => {

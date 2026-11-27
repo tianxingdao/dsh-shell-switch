@@ -1,6 +1,6 @@
 {
   "name": "dsh-shell-switch",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "Choose which local shell runs DSH bash commands (Niubash, Git Bash, MSYS2, WSL), with a bundled Niubash bash for Windows, online update, and detached background jobs with a sidebar panel.",
   "license": "MIT",
   "author": "tianxingdao",
@@ -88,7 +88,7 @@
     }
   },
   "scripts": {
-    "check": "node --check index.js && node --check client.js",
+    "check": "node --check index.js && node --check client.js && node --check background.js && node --check terminal.js",
     "prepublishOnly": "npm run check"
   },
   "publishConfig": {

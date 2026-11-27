@@ -2,9 +2,7 @@
 
 [English](README.en.md) | 简体中文
 
-给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）加一个 **`bash` 工具**和一个 **设置 → Shell 选择器** 页面：bash 命令直接在本机真实存在的 shell（Niubash / Git Bash / MSYS2 / Cygwin / WSL / PATH 里的 `bash.exe`）里执行，不再被改写成 PowerShell 命令。
-
-**装完即用：插件自带一份 [Niubash](https://github.com/unixwin/niubash) bash（Windows 开箱即用、可在线更新升级），装好插件第一步就能完美跑 bash**——无需另装 Git Bash / MSYS2。此外还自带**持久后台任务**（`bg_start` 等工具 + 侧栏面板，跑常驻进程、流式看日志），以及一个能选择本机任意 shell 的**设置页**。Windows 下还会隐藏官方 `pwsh` 工具，让 `bash` 成为唯一的 shell 工具。
+给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）加一个 **`bash` 工具**和一个 **设置 → Shell 选择器** 页面：bash 命令直接在本机真实存在的 shell（Niubash / Git Bash / MSYS2 / Cygwin / WSL / PATH 里的 `bash.exe`）里执行，插件默认启用自带的Windows开箱即用、可在线更新升级的 [Niubash](https://github.com/unixwin/niubash) bash,另外可通过扩展better-sidebar支持常驻进程、流式看日志，默认终端改为所选bash。
 
 ```
 之前：模型想跑 ls → 必须写成 Get-ChildItem（pwsh 工具），或依赖其他插件自带的 MSYS bash（沙箱里经常起不来）
@@ -63,7 +61,8 @@ Windows 上的 DSH 默认有两条 shell 路径：
 
 - **`bash` 工具**：复用官方 `@deepseek-ai/dsh-tool-bash` 与 `@deepseek-ai/dsh-bash-sandbox`，只把执行文件换成你选的 shell。因此超时、输出 spill、沙箱升级、`[exit code: N]` 标记等行为与官方一致。
 - **持久后台会话**：自带 `bg_start` / `bg_output` / `bg_list` / `bg_kill` 四个工具，启动**真正 detach 的常驻进程**（工具调用结束、harness 重启后仍在跑），可增量读日志、按整棵进程树停止。**不依赖** `@deepseek-ai/dsh-tool-jobs`。装了 `dsh-better-sidebar` 时还会注册一个「后台任务」侧栏页（本会话 / 全部、树形分组、流式日志、一键停止）。
-- **设置 → Shell 选择器**：下拉框列出本机所有 shell（含版本、路径），支持保存、恢复默认、重新扫描；保存后**下一条命令即生效**，无需重启。
+- **设置 → Shell 选择器**：下拉框列出本机所有 shell（含版本、路径），支持保存、恢复默认、重新扫描；也可手动输入 shell 路径，校验后加入独立分组。保存后**下一条命令即生效**，无需重启。
+- **侧边终端联动**：终端下拉使用同一份检测到的 shell 列表，包括各个 WSL 发行版。安装了 `dsh-better-sidebar` 时，设置页会显示「跟随这里的 Shell 选择」勾选框（默认开启）；新建终端默认使用当前选择，终端下拉里手动指定的 shell 仍优先。已有终端保持运行，不受影响。
 - **内置 Niubash（自带 bash）**：插件可内置一份 [Niubash](https://github.com/unixwin/niubash)（MIT，Rust 重写的原生 bash 5.3）。**Windows 默认开启、开箱即用**（系统本身没有 bash）；**Linux/macOS 默认不启用**（系统已有 bash，作为可选项）。首次按当前平台从官方 release 下载解压到 `%DSH_HOME%/embedded-niubash`，命令经官方 `--ec`（编码命令）通道执行，天然免引号穿透。详见下文。
 - **Windows 下隐藏 `pwsh`**：官方 `pwsh` 工具无法卸载，但只要本插件启用，就对每个 Agent 加作用域级屏蔽，`bash` 成为唯一 shell 工具；停用插件即恢复。
 - **不破坏现有能力**：不改宿主的 `ctx.shell` 执行器，`pwsh` 执行器行原样保留；其他预设工具（文件、搜索、子代理等）不受影响。
@@ -165,12 +164,15 @@ bash: {
 
 ### 设置 → Shell 选择器
 
-- 下拉框分三组：**可用于 bash**（Git Bash、Niubash、MSYS2、Cygwin、WSL bash）、**PowerShell系列**（`pwsh.exe`、Microsoft Store 别名、Windows PowerShell 5.1）、**已检测到但不可用**（`cmd.exe`、Niubash 的 `winuxsh.exe`、没有 bash 的 WSL 发行版，禁用并标注原因）；
+- 下拉框分组为：**内置 bash**、**手动添加**、**可用于 bash**（Git Bash、Niubash、MSYS2、Cygwin、WSL bash）、**PowerShell系列**（`pwsh.exe`、Microsoft Store 别名、Windows PowerShell 5.1）、**已检测到但不可选**（`cmd.exe`、Niubash 的 `winuxsh.exe`、没有 bash 的 WSL 发行版）；
+- **手动路径**：自动检测遗漏时可直接输入可执行文件路径；插件校验文件存在且为 bash 方言或 PowerShell，加入下拉框但不自动切换，仍需选中并保存。手动条目可移除；
 - 每一项显示版本与完整路径；
 - 卡片显示当前生效 shell、已保存选择、回退配置、沙箱模式；
 - **保存**：写入 `%DSH_HOME%\shell-switch.json`，下一条命令生效；
 - **恢复默认**：清除选择，回落到插件配置的 `shell` / `shellPath` / 自动检测；
 - **重新扫描**：完整重扫注册表并刷新版本（装了新 shell 后点一下；这一次会等待扫描完成，其余时刻都走缓存）。
+
+安装 `dsh-better-sidebar` 后，本页还会显示「**新建侧边终端跟随这里的 Shell 选择**」，默认勾选。终端下拉列出同一份检测结果（含独立的 WSL 发行版）；跟随只影响新建终端，在终端下拉里手动选择仍优先。未安装 better-sidebar 时勾选框隐藏，其余功能不受影响；之后再安装会自动接入。
 
 ### 内置 Niubash（自带 bash，跨平台）
 
@@ -241,6 +243,8 @@ bash: {
 - **不受沙箱约束**：`bg_start` 启动的是脱离进程，**不受**会话文件沙箱限制（后台常驻与只读沙箱语义冲突）。它已脱离受管的 `ctx.subprocess`，以其用户权限运行——工具描述里也明确标注了这一点。
 - **`run_in_background` 已关闭**：`bash` 工具不再暴露 `run_in_background` 参数，后台工作统一走 `bg_*`，避免两套并存、也避免与官方 jobs 组件冲突。
 - **日志轮转**：每个任务日志上限 `maxLogBytes`（默认 8 MB），超出从头部丢弃；保留任务数上限 `maxJobs`（默认 50），先淘汰最旧的已结束任务。
+- **自动清理默认开启**：对**所有会话合计**只保留最新 **50 个已停止任务**，更早的记录和日志自动删除；运行中或停止中的任务不会被清理。开关和保留数量会持久化，重启后仍有效。
+- **空日志正常显示**：没有产生输出的命令会显示「暂无输出」，不会一直停留在「加载中…」。
 
 #### 侧栏面板（依赖 `dsh-better-sidebar`）
 
@@ -281,6 +285,7 @@ Agent 创建
 ├─ background.js         持久后台会话管理器（detached 进程、日志落盘、索引、orphan 扫描）
 ├─ background-tools.js   bg_start / bg_output / bg_list / bg_kill 工具定义
 ├─ embedded.js           内置 Niubash：下载/解压/多版本、检查更新、升级、回退、断点续传
+├─ terminal.js           可选终端控制器集成：检测列表进入终端下拉 + 跟随当前选择
 ├─ client.js             Client 半：设置 → Shell 选择器 + better-sidebar「后台任务」页
 ├─ cordis.patch.yml      bundle 补丁，只插入一行 shell-switch
 ├─ locale/               插件清单里的标题与描述（zh / en）
@@ -315,8 +320,8 @@ profile patch 中的 `shell-switch` 行：
 | `background.enabled` | `true` | 是否启用持久后台会话（`bg_*` 工具与侧栏页） |
 | `background.maxLogBytes` | `8388608` | 单个后台任务日志上限（超出从头丢弃） |
 | `background.maxJobs` | `50` | 保留的后台任务条数（先淘汰最旧的已结束任务） |
-| `background.autoCleanup` | `false` | 自动清理已停止任务（只保留最近 `autoCleanupKeep` 个） |
-| `background.autoCleanupKeep` | `20` | 自动清理时保留的已停止任务数 |
+| `background.autoCleanup` | `true` | 全局自动清理已停止任务（所有会话合计只保留最近 `autoCleanupKeep` 个） |
+| `background.autoCleanupKeep` | `50` | 自动清理开启时，所有会话合计保留的已停止任务数；运行中任务不受影响 |
 | `embedded.enabled` | Windows `true` / 其他 `false` | 是否在选择器提供「内置 Niubash」 |
 | `embedded.autoInstall` | `true` | 缺失时首启是否后台自动下载内置 bash |
 | `embedded.baseUrl` | `https://github.com/unixwin/niubash/releases/download` | 内置 bash 的下载源（可指向镜像） |
@@ -332,7 +337,10 @@ profile patch 中的 `shell-switch` 行：
   "shell": {
     "path": "<bash.exe 的绝对路径>",
     "at": "2026-01-01T00:00:00.000Z"
-  }
+  },
+  "followTerminal": true,
+  "autoCleanup": true,
+  "autoCleanupKeep": 50
 }
 ```
 
@@ -344,10 +352,14 @@ Host 内部接口，仅同源页面可访问（供设置页使用；通过局域
 |---|---|---|
 | `GET` | `/api/dsh-shell-switch/state` | 检测列表、当前选择、生效项、沙箱模式、pwsh 状态 |
 | `POST` | `/api/dsh-shell-switch/select` | `{ "path": "…" }` 选择；`{ "action": "reset" }` 恢复默认 |
+| `POST` | `/api/dsh-shell-switch/custom/add` | `{ "path": "…" }` 校验并添加手动路径到选择器，不自动选中 |
+| `POST` | `/api/dsh-shell-switch/custom/remove` | `{ "path": "…" }` 移除手动添加的选择器条目 |
+| `POST` | `/api/dsh-shell-switch/terminal/follow` | `{ "follow": true }` 开关终端跟随；重启后仍有效 |
 | `GET` | `/api/dsh-shell-switch/jobs?session=<id>` | 本会话 + 其它会话分组的后台任务 |
 | `GET` | `/api/dsh-shell-switch/jobs?all=1` | 全部后台任务（扁平列表） |
 | `GET` | `/api/dsh-shell-switch/jobs/<id>/log?offset=N&limit=M` | 从字节 offset 增量读取某任务日志 |
 | `POST` | `/api/dsh-shell-switch/jobs/<id>/kill` | `{ "reason": "…" }` 结束任务及其进程树（需 JSON 内容类型） |
+| `POST` | `/api/dsh-shell-switch/jobs/auto-cleanup` | `{ "enabled": true, "keep": 50 }` 设置并持久化全局已停止任务清理策略 |
 | `GET` | `/api/dsh-shell-switch/embedded` | 内置 bash 状态（是否启用/支持/已安装、版本、平台、已装版本列表） |
 | `POST` | `/api/dsh-shell-switch/embedded/install` | 下载并安装内置 bash |
 | `POST` | `/api/dsh-shell-switch/embedded/remove` | 移除内置 bash |
@@ -406,9 +418,9 @@ Host 内部接口，仅同源页面可访问（供设置页使用；通过局域
 
 ## 已知限制
 
-- 只影响模型侧的 `bash` 工具；**侧边栏终端**不跟随该选择。
+- 模型侧 `bash` 工具会立即切换；**侧边终端**只在新建时跟随，已有终端进程保持原 shell，终端下拉里手动选择会覆盖跟随。
 - 支持 bash 方言（含 WSL 发行版，要求其内部有 bash）与 PowerShell（7 或 5.1）；`cmd.exe`、`winuxsh.exe` 只能展示，不能选。
-- 选择 PowerShell 后，工具名仍是 `bash`，但语法要求变成 PowerShell —— 提示词和技能里写 bash 的地方需要相应调整。
+- 选择 PowerShell 后，模型侧工具名改为 `pwsh`（隐藏 `bash`），语法为 PowerShell。
 - `pwsh` 屏蔽依赖 Agent 作用域的 `tools.restrict`，所以：
   - 对**已存在的会话**在下一条模型请求生效（不是当前正在流式输出的那条）；
   - 插件被停用/卸载后自动恢复。

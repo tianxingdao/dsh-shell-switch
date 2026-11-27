@@ -5,6 +5,32 @@ window.__ModuleLoader__.load({
     const h = React.createElement;
     const NS = 'settings.shell-switch';
 
+    // Optional integration presence is reactive: better-sidebar may load after
+    // this settings page is already mounted.
+    let betterSidebarPresent = false;
+    const presenceListeners = new Set();
+    let terminalService;
+    const setBetterSidebarPresent = (value) => {
+      betterSidebarPresent = value;
+      for (const listener of presenceListeners) listener();
+    };
+    function useBetterSidebarPresent() {
+      const [present, setPresent] = React.useState(betterSidebarPresent);
+      React.useEffect(() => {
+        const listener = () => setPresent(betterSidebarPresent);
+        presenceListeners.add(listener);
+        return () => presenceListeners.delete(listener);
+      }, []);
+      return present;
+    }
+    /** Keep the terminal client's remembered default aligned when following. */
+    function syncTerminalPreference(state) {
+      const path = state?.terminal?.selectedPath;
+      if (state?.terminal?.follow === true && typeof path === 'string' && path.length > 0) {
+        try { terminalService?.selectShell?.(path); } catch { /* optional integration */ }
+      }
+    }
+
     /** English copy for the Shell selector page. */
     const en = {
       nav: 'Shell',
@@ -29,6 +55,10 @@ window.__ModuleLoader__.load({
       reset: 'Use default',
       saved: 'Saved. The next bash command uses this shell.',
       resetDone: 'Reset to the deployment default.',
+      terminalFollow: 'New sidebar terminals follow this shell selection',
+      terminalFollowHint: 'The terminal dropdown also lists every shell detected here. Following applies to newly opened terminals; close and reopen an existing terminal to change its shell. An explicit choice in the terminal dropdown still wins.',
+      terminalFollowSaved: 'Terminal following preference saved.',
+      terminalFollowFailed: 'Could not save the terminal preference',
       manualLabel: 'Or enter a shell path manually',
       manualPlaceholder: 'e.g. D:\\tools\\git\\bin\\bash.exe',
       manualUse: 'Add this path',
@@ -95,6 +125,7 @@ window.__ModuleLoader__.load({
       bgOpenLog: 'Log',
       bgCloseLog: 'Hide log',
       bgLoadingLog: 'Loading…',
+      bgLogEmpty: 'No output.',
       bgOtherSessions: 'Other conversations',
       bgNoOwner: 'No owner',
       bgJump: 'Open conversation',
@@ -106,9 +137,9 @@ window.__ModuleLoader__.load({
       bgCleanupStopped: 'Clear stopped',
       bgCleanupHint: 'Delete finished jobs and their logs (running jobs are kept)',
       bgCleanupFailed: 'Cleanup failed',
-      bgAutoCleanup: 'Auto-clean stopped',
-      bgAutoKeep: 'keep newest',
-      bgAutoHint: 'When on, only the newest N stopped jobs are kept; older ones are deleted automatically',
+      bgAutoCleanup: 'Auto-clean stopped (global)',
+      bgAutoKeep: 'keep newest across all conversations',
+      bgAutoHint: 'Across ALL conversations combined, keep only the newest N stopped jobs; older ones and their logs are deleted automatically. Running jobs are never touched',
       bgFollowOn: 'Following',
       bgFollowOff: 'Follow',
       bgFollowHint: 'Auto-scroll to the newest output',
@@ -147,6 +178,10 @@ window.__ModuleLoader__.load({
       reset: '恢复默认',
       saved: '已保存，下一条 bash 命令将使用该 shell。',
       resetDone: '已恢复为部署默认值。',
+      terminalFollow: '新建侧边终端跟随这里的 Shell 选择',
+      terminalFollowHint: '终端下拉框也会列出这里检测到的 Shell。跟随只对新建的终端生效；已有终端需关闭后重开。你在终端下拉里单独选择的 Shell 仍优先。',
+      terminalFollowSaved: '终端跟随设置已保存。',
+      terminalFollowFailed: '终端跟随设置保存失败',
       manualLabel: '或手动输入 shell 路径',
       manualPlaceholder: '例如 D:\\tools\\git\\bin\\bash.exe',
       manualUse: '添加此路径',
@@ -213,6 +248,7 @@ window.__ModuleLoader__.load({
       bgOpenLog: '日志',
       bgCloseLog: '收起日志',
       bgLoadingLog: '加载中…',
+      bgLogEmpty: '暂无输出（该命令没有产生日志）。',
       bgOtherSessions: '其它会话',
       bgNoOwner: '无归属',
       bgJump: '前往会话',
@@ -224,9 +260,9 @@ window.__ModuleLoader__.load({
       bgCleanupStopped: '清理已停止',
       bgCleanupHint: '删除已结束的任务及其日志（运行中的任务会保留）',
       bgCleanupFailed: '清理失败',
-      bgAutoCleanup: '自动清理已停止',
-      bgAutoKeep: '保留最近',
-      bgAutoHint: '开启后只保留最近 N 个已停止任务，更早的自动删除',
+      bgAutoCleanup: '自动清理已停止（全局）',
+      bgAutoKeep: '所有会话合计保留最近',
+      bgAutoHint: '对所有会话合计只保留最新 N 个已停止任务；更早的任务及其日志自动删除，运行中的任务不受影响',
       bgFollowOn: '跟随最新',
       bgFollowOff: '跟随',
       bgFollowHint: '自动滚动到最新输出',
@@ -354,6 +390,7 @@ window.__ModuleLoader__.load({
       message: { fontSize: '12px', color: 'var(--dsw-alias-state-success-primary)' },
       error: { fontSize: '12px', color: 'var(--dsw-alias-state-error-primary)' },
       hint: { fontSize: '12px', lineHeight: 1.6, color: 'var(--dsw-alias-label-secondary)' },
+      toggle: { display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: 'var(--dsw-alias-label-primary)', cursor: 'pointer' },
       mono: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', wordBreak: 'break-all' },
     };
 
@@ -377,6 +414,7 @@ window.__ModuleLoader__.load({
       const [embCheck, setEmbCheck] = React.useState(null);
       const [embOp, setEmbOp] = React.useState(null);
       const [manualPath, setManualPath] = React.useState('');
+      const betterSidebar = useBetterSidebarPresent();
 
       /** Install or remove the embedded Niubash, then refresh the shell list. */
       const embeddedAction = async (action) => {
@@ -475,6 +513,7 @@ window.__ModuleLoader__.load({
           const tail = settle === true ? '/state?refresh=1&settle=1' : force === true ? '/state?refresh=1' : '/state';
           const next = await request(tail);
           setState(next);
+          syncTerminalPreference(next);
           setDraft(next.selected?.path ?? next.effective?.path ?? '');
           // Surface a startup update-check result without requiring a click.
           const lc = next?.embedded?.lastCheck;
@@ -510,6 +549,7 @@ window.__ModuleLoader__.load({
             body: JSON.stringify(decodeOption(draft)),
           });
           setState(next);
+          syncTerminalPreference(next);
           setDraft(next.selected?.path ?? next.effective?.path ?? draft);
           setMessage(t('saved'));
         } catch (failure) {
@@ -530,10 +570,31 @@ window.__ModuleLoader__.load({
             body: JSON.stringify({ action: 'reset' }),
           });
           setState(next);
+          syncTerminalPreference(next);
           setDraft(next.effective?.path ?? '');
           setMessage(t('resetDone'));
         } catch (failure) {
           setError(`${t('saveFailed')}：${failure.message}`);
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      const toggleTerminalFollow = async (follow) => {
+        setBusy(true);
+        setError(null);
+        setMessage(null);
+        try {
+          const next = await request('/terminal/follow', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ follow }),
+          });
+          setState(next);
+          syncTerminalPreference(next);
+          setMessage(t('terminalFollowSaved'));
+        } catch (failure) {
+          setError(`${t('terminalFollowFailed')}：${failure.message}`);
         } finally {
           setBusy(false);
         }
@@ -647,6 +708,18 @@ window.__ModuleLoader__.load({
           h('button', { type: 'button', style: styles.primary, disabled: busy || !dirty, onClick: save }, busy ? t('saving') : t('save')),
           h('button', { type: 'button', style: styles.button, disabled: busy, onClick: reset }, t('reset')),
           h('button', { type: 'button', style: styles.button, disabled: busy, onClick: () => load(false, true) }, t('refresh'))),
+        betterSidebar
+          ? h('div', { style: styles.field },
+            h('label', { style: styles.toggle },
+              h('input', {
+                type: 'checkbox',
+                checked: state.terminal?.follow !== false,
+                disabled: busy,
+                onChange: (event) => toggleTerminalFollow(event.target.checked),
+              }),
+              h('span', null, t('terminalFollow'))),
+            h('p', { style: styles.hint }, t('terminalFollowHint')))
+          : null,
         // Manual path: when auto-detection misses a shell (custom build, odd
         // install location), let the user type the executable path. Adding puts
         // it into the dropdown above; you then pick it there and Save.
@@ -860,6 +933,7 @@ window.__ModuleLoader__.load({
     function LogView(props) {
       const t = props.t;
       const text = props.text ?? '';
+      const loading = props.loading === true;
       const [follow, setFollow] = React.useState(true);
       const [search, setSearch] = React.useState('');
       const [full, setFull] = React.useState(false);
@@ -978,7 +1052,7 @@ window.__ModuleLoader__.load({
       /** Split into terminal lines with a gutter and token coloring. */
       const renderLines = () => {
         if (text.length === 0) {
-          return [h('div', { key: 'empty', style: { color: '#8b949e', padding: '4px 10px' } }, t('bgLoadingLog'))];
+          return [h('div', { key: 'empty', style: { color: '#8b949e', padding: '4px 10px' } }, loading ? t('bgLoadingLog') : t('bgLogEmpty'))];
         }
         const lines = text.split('\n');
         const q = search.trim();
@@ -1127,6 +1201,7 @@ window.__ModuleLoader__.load({
       const [expanded, setExpanded] = React.useState(() => new Set());
       const [openLog, setOpenLog] = React.useState(null); // jobId
       const [logText, setLogText] = React.useState({});
+      const [logLoaded, setLogLoaded] = React.useState({}); // successful read, even when empty
       const [logFollow, setLogFollow] = React.useState(true); // auto-scroll to newest
       const [logFull, setLogFull] = React.useState(false); // fullscreen modal
       const [busy, setBusy] = React.useState({});
@@ -1179,6 +1254,9 @@ window.__ModuleLoader__.load({
             if (typeof read.text === 'string' && read.text.length > 0) {
               setLogText((prev) => ({ ...prev, [jobId]: (prev[jobId] ?? '') + read.text }));
             }
+            // A successful empty read is a completed load, not perpetual
+            // "Loading…": stopped commands often legitimately produce no log.
+            setLogLoaded((prev) => ({ ...prev, [jobId]: true }));
             logOffsetRef.current[jobId] = typeof read.offset === 'number' ? read.offset : offset;
           } catch {
             // A missing log file (just started) is not an error worth surfacing.
@@ -1216,6 +1294,7 @@ window.__ModuleLoader__.load({
           // Forget this job's cached log so a same-named future job starts clean.
           setOpenLog((cur) => (cur === jobId ? null : cur));
           setLogText((prev) => { const copy = { ...prev }; delete copy[jobId]; return copy; });
+          setLogLoaded((prev) => { const copy = { ...prev }; delete copy[jobId]; return copy; });
           delete logOffsetRef.current[jobId];
           await load();
         } catch (failure) {
@@ -1305,6 +1384,7 @@ window.__ModuleLoader__.load({
                 job,
                 t,
                 text: logText[job.id] ?? '',
+                loading: logLoaded[job.id] !== true,
               }))
             : null);
       };
@@ -1459,6 +1539,10 @@ window.__ModuleLoader__.load({
         // ran before it existed, so the tab silently never registered.
         ctx.inject(['betterSidebar'], (serviceCtx) => {
           serviceCtx.effect(() => {
+            setBetterSidebarPresent(true);
+            return () => setBetterSidebarPresent(false);
+          }, 'dsh-shell-switch: better-sidebar presence');
+          serviceCtx.effect(() => {
             const service = serviceCtx.betterSidebar ?? (typeof serviceCtx.get === 'function' ? serviceCtx.get('betterSidebar') : undefined);
             if (service === undefined || typeof service.registerTab !== 'function') return () => {};
             const dispose = service.registerTab({
@@ -1474,6 +1558,23 @@ window.__ModuleLoader__.load({
               if (typeof dispose === 'function') dispose();
             };
           }, 'dsh-shell-switch: better-sidebar jobs tab');
+        });
+        // The terminal client remembers a preferred shell in localStorage. Keep
+        // that preference aligned while following is enabled, including when
+        // the user never opens this Settings page before opening a terminal.
+        ctx.inject(['webTerminals'], (serviceCtx) => {
+          serviceCtx.effect(() => {
+            const service = serviceCtx.webTerminals ?? serviceCtx.get?.('webTerminals');
+            terminalService = service;
+            let active = true;
+            void request('/state').then((next) => {
+              if (active) syncTerminalPreference(next);
+            }).catch(() => {});
+            return () => {
+              active = false;
+              if (terminalService === service) terminalService = undefined;
+            };
+          }, 'dsh-shell-switch: terminal preference sync');
         });
       },
     };

@@ -2,9 +2,9 @@
 
 English | [简体中文](README.md)
 
-Adds a **`bash` tool** and a **Settings → Shell** page to [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH): bash commands run in a real shell installed on the machine (Niubash, Git Bash, MSYS2, Cygwin, WSL, or any `bash.exe` on `PATH`) instead of being rewritten as PowerShell.
+Adds a **`bash` tool** and a **Settings → Shell selector** page to [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH): bash commands run directly in a real shell installed on the machine (Niubash, Git Bash, MSYS2, Cygwin, WSL, or any `bash.exe` on `PATH`).
 
-**Works out of the box: the plugin ships its own [Niubash](https://github.com/unixwin/niubash) bash (on by default on Windows, with online update/upgrade), so the very first step after installing works perfectly with bash** — no separate Git Bash / MSYS2 needed. It also ships **persistent background jobs** (the `bg_start` tools plus a sidebar panel — run long-lived processes and stream their logs) and a **Settings page** to pick any local shell. On Windows the shipped `pwsh` tool is hidden as well, leaving `bash` as the only shell tool.
+On Windows the plugin enables its bundled [Niubash](https://github.com/unixwin/niubash) bash by default — ready to use out of the box, with online update and upgrade support. It also ships persistent background jobs with streaming logs. With `dsh-better-sidebar` installed, those jobs get a sidebar panel and new sidebar terminals follow the selected shell by default.
 
 ```
 Before: "ls" had to be written as Get-ChildItem (pwsh tool), or rely on the MSYS bash
@@ -66,7 +66,8 @@ This plugin fills that gap: **detect every local shell → choose one in Setting
 
 - **A `bash` tool built on the shipped packages**: it reuses `@deepseek-ai/dsh-tool-bash` and `@deepseek-ai/dsh-bash-sandbox` and only swaps the executable. Timeouts, output spill files, sandbox escalation and the `[exit code: N]` marker all behave exactly like the official tool.
 - **Persistent background sessions**: four self-contained tools — `bg_start` / `bg_output` / `bg_list` / `bg_kill` — that spawn **real detached processes** (they outlive the tool call and a harness restart), stream their log incrementally, and stop the whole process tree. **No dependency on `@deepseek-ai/dsh-tool-jobs`**. When `dsh-better-sidebar` is installed, a "Background jobs" sidebar tab is registered too (This conversation / All, tree grouped by conversation, streaming log, one-click stop).
-- **Settings → Shell selector**: a dropdown listing every detected shell with version and path, plus Save, Reset and Rescan. The change applies to the **next command** — no restart.
+- **Settings → Shell selector**: a dropdown listing every detected shell with version and path, plus Save, Reset and Rescan. Manually entered shell paths are validated and added to their own picker group. The change applies to the **next command** — no restart.
+- **Sidebar terminal integration**: the terminal dropdown uses the same detected-shell list, including individual WSL distributions. When `dsh-better-sidebar` is installed, Settings shows a **follow this selection** checkbox (on by default); newly opened terminals then use the selected shell, while an explicit terminal-dropdown choice still wins. Existing terminals are left running.
 - **Built-in Niubash (bundled bash)**: the plugin can carry its own [Niubash](https://github.com/unixwin/niubash) (MIT, a native Rust rewrite of bash 5.3). **Windows: on by default**, ready out of the box (no system bash there); **Linux/macOS: off by default** (a system bash exists, offered as optional). On first need it downloads the official release for the current platform into `%DSH_HOME%/embedded-niubash` and runs commands through the project's `--ec` encoded-command handoff. **First run defaults to the built-in bash** (no saved choice + installed), then you can switch freely — a saved choice always wins. See below.
 - **`pwsh` hidden on Windows**: the shipped `pwsh` tool cannot be uninstalled, so while this plugin is active a scope-level deny filter removes it from every Agent, making `bash` the only shell tool. Disabling the plugin restores it.
 - **Nothing else disturbed**: the host's `ctx.shell` executor is untouched and the `pwsh-sandbox` row stays composed; other preset tools (files, search, subagents, …) are unaffected.
@@ -182,6 +183,8 @@ Key points:
 - **Truly persistent**: the process is `spawn(..., { detached: true })` + `unref()`, output redirected to `%DSH_HOME%\shell-switch-jobs\<id>.log`. It keeps running after the tool call and even after a harness restart; a job still alive across a restart is marked `orphan` and can still be killed.
 - **Not sandbox-confined**: `bg_start` runs outside the managed `ctx.subprocess`, so it is **not** confined by the session sandbox — background daemons and read-only confinement contradict each other. The tool description states this explicitly.
 - **Log rotation**: per-job log cap `maxLogBytes` (default 8 MB, dropped from the head); retained-job cap `maxJobs` (default 50, oldest settled first).
+- **Automatic cleanup is on by default**: across **all conversations combined**, keep only the newest **50 stopped jobs** and delete older records and logs. Running or stopping jobs are never removed. The on/off choice and retention count persist across restarts.
+- **Empty logs render correctly**: a command that produced no output shows "No output" rather than staying on "Loading…" forever.
 
 #### Sidebar panel (`dsh-better-sidebar`)
 
@@ -191,12 +194,15 @@ With [`dsh-better-sidebar`](https://github.com/omdsh-dev/DSH-better-sidebar) ins
 
 ### Settings → Shell selector
 
-- The dropdown has three groups: **Bash-compatible** (Git Bash, Niubash, MSYS2, Cygwin, WSL bash), **PowerShell series** (`pwsh.exe`, the Microsoft Store alias, Windows PowerShell 5.1), and **Detected but unusable** (`cmd.exe`, Niubash's `winuxsh.exe`, WSL distributions without bash; disabled with a reason);
+- The dropdown groups entries as **Built-in bash**, **Manually added**, **Bash-compatible** (Git Bash, Niubash, MSYS2, Cygwin, WSL bash), **PowerShell series** (`pwsh.exe`, the Microsoft Store alias, Windows PowerShell 5.1), and **Detected but not selectable** (`cmd.exe`, Niubash's `winuxsh.exe`, WSL distributions without bash);
 - Every entry shows its version and full path;
+- **Manual path**: enter an executable path when auto-detection misses a shell. The plugin verifies that it exists and is a bash-family shell or PowerShell, then adds it to the dropdown without selecting it; choose it and Save as usual. Manual entries can be removed later;
 - The card shows the effective shell, the saved choice, the fallback config, and the sandbox mode;
 - **Save** writes `%DSH_HOME%\shell-switch.json`; the next command uses it;
 - **Reset** clears the choice and falls back to the plugin's `shell` / `shellPath` / auto-detection;
 - **Rescan** re-reads the registry and refreshes versions (useful after installing a new shell; this one waits for the scan, every other call is served from cache).
+
+When `dsh-better-sidebar` is installed, this page also shows **New sidebar terminals follow this shell selection**, enabled by default. The terminal dropdown lists the same detected shells (including separate WSL distributions); following affects only newly opened terminals, and an explicit terminal-dropdown selection takes precedence. If better-sidebar is absent the checkbox is hidden and the rest of the plugin is unaffected; installing it later activates the integration automatically.
 
 ### Embedded Niubash (bundled bash, cross-platform)
 
@@ -276,6 +282,7 @@ Key decisions:
 ├─ background.js        Persistent background-session manager (detached procs, log files, index, orphan sweep)
 ├─ background-tools.js  bg_start / bg_output / bg_list / bg_kill tool definitions
 ├─ embedded.js          Bundled Niubash: download/extract/multi-version, update check, upgrade, rollback, resume
+├─ terminal.js          Optional terminal-controller integration: detected-shell dropdown + follow-current-selection
 ├─ client.js            Client half: Settings → Shell selector + better-sidebar "Background jobs" tab
 ├─ cordis.patch.yml     Bundle patch: inserts the single `shell-switch` row
 ├─ locale/             Inventory title and description (zh / en)
@@ -310,8 +317,8 @@ The `shell-switch` row in the profile patch:
 | `background.enabled` | `true` | Enable persistent background sessions (the `bg_*` tools and the sidebar tab) |
 | `background.maxLogBytes` | `8388608` | Per-job log cap (dropped from the head when exceeded) |
 | `background.maxJobs` | `50` | Retained job count (oldest settled jobs pruned first) |
-| `background.autoCleanup` | `false` | Auto-remove stopped jobs (keep the most recent `autoCleanupKeep`) |
-| `background.autoCleanupKeep` | `20` | Stopped jobs to keep when auto-cleanup is on |
+| `background.autoCleanup` | `true` | Auto-remove stopped jobs globally (across all conversations combined, keep the most recent `autoCleanupKeep`) |
+| `background.autoCleanupKeep` | `50` | Stopped jobs to keep across all conversations when auto-cleanup is on; running jobs are never touched |
 | `embedded.enabled` | Windows `true` / else `false` | Offer the bundled Niubash in the selector |
 | `embedded.autoInstall` | `true` | Download the bundled bash in the background on first start when missing |
 | `embedded.baseUrl` | `https://github.com/unixwin/niubash/releases/download` | Bundled bash download source (point at a mirror) |
@@ -327,7 +334,10 @@ Resolution order: the Settings choice → `shellPath` → `shell` → auto-detec
   "shell": {
     "path": "<absolute path to bash.exe>",
     "at": "2026-01-01T00:00:00.000Z"
-  }
+  },
+  "followTerminal": true,
+  "autoCleanup": true,
+  "autoCleanupKeep": 50
 }
 ```
 
@@ -339,10 +349,14 @@ Host-internal endpoints, reachable only from the same origin (used by the Settin
 |---|---|---|
 | `GET` | `/api/dsh-shell-switch/state` | Detected shells, current choice, effective shell, sandbox mode, pwsh status |
 | `POST` | `/api/dsh-shell-switch/select` | `{ "path": "…" }` to select; `{ "action": "reset" }` to reset |
+| `POST` | `/api/dsh-shell-switch/custom/add` | `{ "path": "…" }` validate and add a manual path to the picker without selecting it |
+| `POST` | `/api/dsh-shell-switch/custom/remove` | `{ "path": "…" }` remove a manual picker entry |
+| `POST` | `/api/dsh-shell-switch/terminal/follow` | `{ "follow": true }` enable/disable terminal following; persists across restarts |
 | `GET` | `/api/dsh-shell-switch/jobs?session=<id>` | Background jobs grouped: this conversation + others |
 | `GET` | `/api/dsh-shell-switch/jobs?all=1` | All background jobs (flat list) |
 | `GET` | `/api/dsh-shell-switch/jobs/<id>/log?offset=N&limit=M` | Incremental log read from byte offset |
 | `POST` | `/api/dsh-shell-switch/jobs/<id>/kill` | `{ "reason": "…" }` stop the job and its tree (JSON content type) |
+| `POST` | `/api/dsh-shell-switch/jobs/auto-cleanup` | `{ "enabled": true, "keep": 50 }` set and persist global stopped-job cleanup |
 | `GET` | `/api/dsh-shell-switch/embedded` | Bundled bash status (enabled/supported/installed, version, platform, installed versions) |
 | `POST` | `/api/dsh-shell-switch/embedded/install` | Download and install the bundled bash |
 | `POST` | `/api/dsh-shell-switch/embedded/remove` | Remove the bundled bash |
@@ -401,7 +415,7 @@ Compatibility notes:
 
 ## Known limitations
 
-- Only the model-facing `bash` tool is affected; the **sidebar terminal** does not follow the choice.
+- The model-facing `bash` tool changes immediately; **sidebar terminals** follow only when newly opened. Existing terminal processes keep their shell, and an explicit terminal-dropdown choice overrides following.
 - Bash dialects (including WSL distributions that actually contain bash) and PowerShell (7 or 5.1) can be selected; `cmd.exe` and `winuxsh.exe` are listed but cannot be.
 - With PowerShell selected, the official `pwsh` tool is the visible one and `bash` is hidden — prompts and skills written for bash need adjusting.
 - The `pwsh` filter relies on a scope-level `tools.restrict`, therefore:

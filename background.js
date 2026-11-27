@@ -35,7 +35,7 @@ const DEFAULT_MAX_LOG_BYTES = 8 * 1024 * 1024;
 /** Default cap on retained (non-running) jobs, oldest pruned first. */
 const DEFAULT_MAX_JOBS = 50;
 /** Auto-cleanup keeps this many newest STOPPED jobs; older ones are deleted. */
-const DEFAULT_AUTO_CLEANUP_KEEP = 20;
+const DEFAULT_AUTO_CLEANUP_KEEP = 50;
 /** How often the liveness sweep re-checks a running job's pid. */
 const SWEEP_MS = 4000;
 
@@ -302,9 +302,10 @@ export class BackgroundSessions {
   constructor(options = {}) {
     this.maxLogBytes = Number.isFinite(options.maxLogBytes) ? options.maxLogBytes : DEFAULT_MAX_LOG_BYTES;
     this.maxJobs = Number.isFinite(options.maxJobs) ? options.maxJobs : DEFAULT_MAX_JOBS;
-    // Auto-cleanup of STOPPED jobs: when on, keep only the newest
-    // `autoCleanupKeep` settled jobs and delete the rest (log file included).
-    this.autoCleanup = options.autoCleanup === true;
+    // Auto-cleanup of STOPPED jobs is GLOBAL: across every session combined,
+    // keep only the newest `autoCleanupKeep` settled jobs and delete the rest
+    // (log file included). Default: enabled, keep 50.
+    this.autoCleanup = options.autoCleanup !== false;
     this.autoCleanupKeep = Number.isFinite(options.autoCleanupKeep) ? options.autoCleanupKeep : DEFAULT_AUTO_CLEANUP_KEEP;
     this.debug = options.debug ?? (() => {});
     /** @type {Map<string, object>} jobId → record */

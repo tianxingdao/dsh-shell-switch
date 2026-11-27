@@ -4,6 +4,37 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.4] — 2026-11-27
+
+### Added
+
+- **Sidebar terminal integration** — the optional terminal-controller bridge
+  feeds the same detected shells into the terminal dropdown, including separate
+  WSL distributions with the correct `-d <distro> bash` launch arguments. When
+  `dsh-better-sidebar` is installed, Settings → Shell shows **New sidebar
+  terminals follow this shell selection** (on by default). The preference is
+  persisted; only newly opened terminals follow, and an explicit choice in the
+  terminal dropdown always wins. Missing or late-installed optional plugins are
+  handled without changing the model-facing bash/background-job behavior.
+- **Terminal follow preference route** — `POST /terminal/follow` accepts
+  `{ "follow": boolean }`; the current terminal-facing path is exposed in the
+  Settings state.
+
+### Changed
+
+- **Automatic background-job cleanup is now on by default**, globally across
+  all conversations: keep the newest **50 stopped jobs** and remove older
+  records and logs. Running/stopping jobs are never removed. The panel's on/off
+  choice and retention count now persist in `shell-switch.json` across restarts.
+- **Chinese and English READMEs refreshed** for terminal following, manual
+  paths, global cleanup, current defaults and the latest HTTP surface.
+
+### Fixed
+
+- **Empty job logs no longer stay on "Loading…" forever** — the client now
+  distinguishes the initial request from a successfully-read empty log and
+  shows "No output" for stopped commands that produced none.
+
 ## [0.4.3] — 2026-11-26
 
 ### Added
